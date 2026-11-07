@@ -61,8 +61,29 @@ def _value(info: dict, key: str):
     return info.get(key)
 
 
-def evaluate_fundamentals(info: dict) -> dict:
-    """Tagastab {'metrics': [...], 'categories': {kat: skoor}, 'score': koondskoor|None}."""
+TECH_CATEGORY = "Tehnoloogia"
+TECH_WEIGHT = 2.0  # tehnoloogiafirmadel on tehnoloogianäitajad topeltkaaluga
+
+
+def evaluate_fundamentals(info: dict, statements: dict | None = None) -> dict:
+    """Tagastab {'metrics': [...], 'categories': {kat: skoor}, 'score': koondskoor|None, 'tech': ...}.
+
+    Tehnoloogiafirmadel lisandub kategooria "Tehnoloogia" (Rule of 40, SBC, brutomarginaal jne).
+    """
+    from .tech import evaluate_tech  # tsükliline import: tech kasutab linear_score'i
+
+    res = _evaluate_general(info)
+    tech = evaluate_tech(info, statements or {})
+    res["tech"] = tech
+    if tech and tech["score"] is not None:
+        res["categories"][TECH_CATEGORY] = tech["score"]
+        pairs = [(s, TECH_WEIGHT if c == TECH_CATEGORY else 1.0)
+                 for c, s in res["categories"].items() if s is not None]
+        res["score"] = sum(s * w for s, w in pairs) / sum(w for _, w in pairs)
+    return res
+
+
+def _evaluate_general(info: dict) -> dict:
     metrics = []
     by_cat: dict[str, list[float]] = {c: [] for c in CATEGORIES}
     for r in RULES:

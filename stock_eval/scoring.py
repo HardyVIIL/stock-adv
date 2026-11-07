@@ -61,6 +61,7 @@ class Evaluation:
             "Fundamentaal": self.fundamentals["score"],
             "DCF": d.score if d else None,
             "Tehniline": self.technical["score"],
+            "Rule of 40": (self.fundamentals.get("tech") or {}).get("raw", {}).get("rule40"),
             "Analüütikute siht 12k": a.mean if a else None,
             "Potentsiaal 12k": a.upside if a else None,
             f"Oodatav hind {self.horizon}a": p.price if p else None,
@@ -75,7 +76,7 @@ def evaluate(snapshot: Snapshot, weights: dict[str, float] | None = None,
              dcf_overrides: dict | None = None, horizon: int = 3,
              growth_overrides: dict | None = None) -> Evaluation:
     weights = weights or DEFAULT_WEIGHTS
-    fund = evaluate_fundamentals(snapshot.info)
+    fund = evaluate_fundamentals(snapshot.info, snapshot.statements)
     dcf, reason = evaluate_dcf(snapshot.info, snapshot.fcf_history, snapshot.price, **(dcf_overrides or {}))
     tech = evaluate_technical(snapshot.prices)
     growth = evaluate_growth(snapshot.info, snapshot.estimates, snapshot.price, **(growth_overrides or {}))

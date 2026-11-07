@@ -12,8 +12,10 @@ import yfinance as yf
 
 from stock_eval.data import fetch_snapshot
 from stock_eval.dcf import estimate_discount_rate, estimate_growth
-from stock_eval.fundamentals import CATEGORIES
-from stock_eval.portfolio import fx_symbol, holdings_table, normalize_currency, parse_yahoo_csv, weighted_score
+from stock_eval.fundamentals import CATEGORIES, TECH_CATEGORY
+from stock_eval import benchmark as bm
+from stock_eval.portfolio import (aggregate_lots, apply_splits, fx_symbol, holdings_table, normalize_currency,
+                                  read_lots, weighted_score)
 from stock_eval.scoring import evaluate, rating
 
 st.set_page_config(page_title="Aktsiate evalueerija", page_icon="📈", layout="wide")
@@ -38,6 +40,11 @@ def fx_rate(currency: str, base: str = BASE_CURRENCY) -> float | None:
         return None
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_closes(tickers: tuple[str, ...], start: str) -> pd.DataFrame:
+    return bm.download_closes(list(tickers), start)
+
+
 def fmt_big(v: float | None) -> str:
     if v is None:
         return "—"
@@ -52,7 +59,7 @@ with st.sidebar:
     st.header("Aktsiad")
     source = st.radio("Allikas", ["Minu Yahoo portfell", "Käsitsi"], horizontal=True,
                       index=0 if PORTFOLIO_FILE.exists() else 1)
-    portfolio = None
+    portfolio = lots_raw = None
     if source == "Minu Yahoo portfell":
         up = st.file_uploader("Yahoo Finance eksport (quotes.csv)", type="csv",
                               help="Yahoo Finance → My Portfolio → vali portfell → Export")
@@ -60,7 +67,8 @@ with st.sidebar:
             PORTFOLIO_FILE.write_bytes(up.getvalue())  # jäetakse meelde järgmiseks korraks
         if PORTFOLIO_FILE.exists():
             try:
-                portfolio = parse_yahoo_csv(PORTFOLIO_FILE)
+                lots_raw = read_lots(PORTFOLIO_FILE)
+                portfolio = aggregate_lots(lots_raw)
                 st.caption(f"Laetud {len(portfolio)} tickerit failist {PORTFOLIO_FILE.name}")
             except Exception as e:
                 st.error(f"Faili ei õnnestunud lugeda: {e}")
@@ -100,8 +108,17 @@ with st.sidebar:
     dcf_over["terminal_growth"] = st.slider("Terminaalne kasv, %", 0.0, 4.0, 2.5, 0.25) / 100
     dcf_over["years"] = st.select_slider("Prognoosiperiood (aastat)", [5, 8, 10, 15], 10)
 
+    st.header("Võrdlus indeksiga")
+    bench = st.selectbox("Peamine võrdlusindeks", list(bm.BENCHMARKS), format_func=bm.BENCHMARKS.get)
+    bench_extra = st.multiselect("Graafikul lisaks", [b for b in bm.BENCHMARKS if b != bench],
+                                 default=[b for b in ("SPY",) if b != bench], format_func=bm.BENCHMARKS.get)
+    include_received = st.checkbox("Arvesta tulemustasu / tasuta saadud aktsiaid", value=False,
+                                   help="0-hinnaga read, mis pole tükeldused. Kaasamisel võrreldakse neid "
+                                        "saamise päeva turuväärtusega.")
+
     if st.button("Värskenda andmeid"):
         load.clear()
+        load_closes.clear()
 
 st.title("📈 Aktsiate evalueerija")
 st.caption("Fundamentaalanalüüs · DCF hindamine · Tehniline analüüs · Kasvupotentsiaal — andmed: Yahoo Finance")
@@ -125,6 +142,12 @@ for e in errors:
 if not evals:
     st.stop()
 
+split_notes: list[str] = []
+splits = {t: e.snapshot.splits for t, e in evals.items()}
+if lots_raw is not None:
+    lots, split_notes = apply_splits(lots_raw, splits)
+    portfolio = aggregate_lots(lots)
+
 # ---------------- Koondtabel ----------------
 summary = pd.DataFrame([e.summary_row() for e in evals.values()]).sort_values(
     "Koondskoor", ascending=False, na_position="last")
@@ -133,6 +156,8 @@ score_col = lambda label: st.column_config.ProgressColumn(label, min_value=0, ma
 # ---------------- Minu portfell ----------------
 if portfolio is not None and (portfolio["Kogus"] > 0).any():
     st.subheader("Minu portfell")
+    for note in split_notes:
+        st.info("✂️ " + note + ". Soovi korral lisa Yahoos tükelduse rida (0-hinnaga), siis seda märget ei tule.")
     currencies = {t: e.snapshot.info.get("currency") for t, e in evals.items()}
     fx = {}
     for c in {normalize_currency(c)[0] for c in currencies.values() if c}:
@@ -199,6 +224,94 @@ if portfolio is not None and (portfolio["Kogus"] > 0).any():
         st.info("Nõrga koondskooriga positsioonid (<40): " + ", ".join(
             f"{r.Ticker} ({r.Osakaal:.0%} portfellist)" for r in weak.itertuples()) +
             " — vaata detailvaatest, milline osaskoor neid alla tõmbab.")
+
+    # ---------------- Võrdlus indeksiga ----------------
+    st.divider()
+    st.subheader(f"Võrdlus indeksiga: {bm.BENCHMARKS[bench]}")
+    dl = bm.dated_lots(lots)
+    if dl.empty:
+        st.info("Võrdluseks on vaja ostukuupäevi (Yahoo eksporti veerg Trade Date).")
+    else:
+        bench_list = [bench] + bench_extra
+        cur_all = {**currencies, **{b: "USD" for b in bench_list}}
+        fx_syms = bm.fx_symbols({c for c in cur_all.values() if c})
+        start = (dl["Kuupäev"].min() - pd.Timedelta(days=10)).date().isoformat()
+        hist_start = (pd.Timestamp.today() - pd.DateOffset(years=5, days=10)).date().isoformat()
+        with st.spinner("Laen hinnaajalugu…"):
+            closes = load_closes(tuple(sorted(set(h["Ticker"]) | set(bench_list) | set(fx_syms.values()))),
+                                 min(start, hist_start))
+        try:
+            cmp = bm.lot_comparison(dl, {t: e.snapshot.price for t, e in evals.items()}, currencies, closes,
+                                    bench, splits=splits, include_received=include_received)
+        except ValueError as e:
+            cmp = pd.DataFrame()
+            st.warning(str(e))
+
+        tab_lots, tab_hist = st.tabs(["Minu ostud vs indeks", "Praeguse koosseisu ajalugu"])
+        with tab_lots:
+            if cmp.empty:
+                st.info("Võrdlust ei saanud teha.")
+            else:
+                inv, val, idx = cmp["Investeeritud €"].sum(), cmp["Väärtus €"].sum(), cmp["Indeksis oleks €"].sum()
+                b1, b2, b3, b4 = st.columns(4)
+                b1.metric("Investeeritud", f"{inv:,.0f} €")
+                b2.metric("Minu aktsiad praegu", f"{val:,.0f} €", f"{val / inv - 1:+.1%}")
+                b3.metric(f"Kui oleks ostnud {bench}", f"{idx:,.0f} €", f"{idx / inv - 1:+.1%}")
+                b4.metric("Vahe", f"{val - idx:+,.0f} €", "aktsiavalik ületas indeksit" if val > idx
+                          else "indeks oleks olnud parem", delta_color="normal" if val > idx else "inverse")
+                st.caption(
+                    f"Iga ost on võrreldud sellega, kui sama summa (eurodes) oleks samal päeval pandud {bench}-i. "
+                    "Valuutakursside mõju on arvestatud mõlemal poolel; dividende ei arvestata kummalgi. "
+                    + ("Tulemustasu/tasuta saadud aktsiad on arvestatud saamise päeva turuväärtusega."
+                       if include_received else "Tulemustasu/tasuta saadud aktsiad (0-hinnaga read) on välja "
+                       "jäetud – need pole ostuotsused."))
+                won = (cmp["Vahe €"] > 0).sum()
+                st.markdown(f"**{won} / {len(cmp)}** positsiooni on ületanud indeksit.")
+                fig = go.Figure(go.Bar(
+                    x=cmp["Ticker"], y=cmp["Vahe €"],
+                    marker_color=["#27ae60" if v > 0 else "#e74c3c" for v in cmp["Vahe €"]],
+                    hovertemplate="%{x}: %{y:+,.0f} €<extra></extra>"))
+                fig.update_layout(height=300, margin=dict(t=30, b=10), title=f"Vahe vs {bench} (€)")
+                st.plotly_chart(fig, width="stretch")
+                st.dataframe(cmp.drop(columns=["Saadud aktsiad"]), hide_index=True, width="stretch",
+                             column_config={
+                                 "Esimene ost": st.column_config.DateColumn(format="DD.MM.YYYY"),
+                                 "Investeeritud €": st.column_config.NumberColumn(format="%.0f"),
+                                 "Väärtus €": st.column_config.NumberColumn(format="%.0f"),
+                                 "Indeksis oleks €": st.column_config.NumberColumn(format="%.0f"),
+                                 "Tootlus": st.column_config.NumberColumn(format="percent"),
+                                 "Indeksi tootlus": st.column_config.NumberColumn(format="percent"),
+                                 "Vahe €": st.column_config.NumberColumn(format="%+.0f"),
+                                 "Vahe %-p": st.column_config.NumberColumn(format="percent"),
+                             })
+        with tab_hist:
+            period = st.radio("Periood", [1, 3, 5], index=1, horizontal=True, format_func=lambda y: f"{y} a",
+                              key="hist_period")
+            eur = bm.to_eur(closes, cur_all)
+            weights = dict(zip(h["Ticker"], h["Osakaal"].fillna(0)))
+            hist = bm.composition_history(eur, weights, bench_list,
+                                          closes.index[-1] - pd.DateOffset(years=period))
+            if hist.empty:
+                st.info("Ajalugu ei saanud arvutada.")
+            else:
+                fig = go.Figure()
+                for c in hist.columns:
+                    fig.add_scatter(x=hist.index, y=hist[c], name=c,
+                                    line=dict(width=3 if c == "Minu portfell" else 1.5))
+                fig.update_layout(height=380, margin=dict(t=30, b=10), legend_orientation="h",
+                                  title=f"Praegune koosseis vs indeksid, {period} a (algus = 100, eurodes)")
+                st.plotly_chart(fig, width="stretch")
+                yrs = (hist.index[-1] - hist.index[0]).days / 365.25
+                stats = pd.DataFrame({
+                    "Kokku": hist.iloc[-1] / 100 - 1,
+                    "Aastas": (hist.iloc[-1] / 100) ** (1 / yrs) - 1,
+                    "Suurim langus": [bm.max_drawdown(hist[c]) for c in hist.columns],
+                }, index=hist.columns)
+                st.dataframe(stats, width="stretch", column_config={
+                    c: st.column_config.NumberColumn(format="percent") for c in stats.columns})
+                st.caption("Näitab, kuidas oleks käitunud portfell praeguste osakaaludega (igapäevaselt "
+                           "tasakaalustatuna) – mitte sinu tegelikke tehinguid. Lühema ajalooga aktsiad on "
+                           "arvesse võetud alates nende börsile tulekust.")
     st.divider()
 
 st.subheader("Koondvaade")
@@ -213,6 +326,7 @@ st.dataframe(
         "Fundamentaal": score_col("Fundamentaal"),
         "DCF": score_col("DCF"),
         "Tehniline": score_col("Tehniline"),
+        "Rule of 40": st.column_config.NumberColumn(format="%.0f", help="Käibe kasv % + FCF marginaal %"),
         "Analüütikute siht 12k": st.column_config.NumberColumn(format="%.2f"),
         "Potentsiaal 12k": st.column_config.NumberColumn(format="percent"),
         f"Oodatav hind {horizon}a": st.column_config.NumberColumn(format="%.2f"),
@@ -227,12 +341,12 @@ st.download_button("Laadi alla CSV", summary.to_csv(index=False).encode("utf-8")
 # Kategooriate võrdlus
 cat_rows = []
 for t, e in evals.items():
-    for c in CATEGORIES:
-        cat_rows.append({"Ticker": t, "Kategooria": c, "Skoor": e.fundamentals["categories"][c]})
+    for c in CATEGORIES + [TECH_CATEGORY]:
+        cat_rows.append({"Ticker": t, "Kategooria": c, "Skoor": e.fundamentals["categories"].get(c)})
 cat_df = pd.DataFrame(cat_rows).dropna()
 if not cat_df.empty:
     fig = go.Figure()
-    for c in CATEGORIES:
+    for c in CATEGORIES + [TECH_CATEGORY]:
         sub = cat_df[cat_df["Kategooria"] == c]
         fig.add_bar(name=c, x=sub["Ticker"], y=sub["Skoor"])
     fig.update_layout(barmode="group", height=320, yaxis_range=[0, 100], margin=dict(t=30, b=10),
@@ -332,10 +446,17 @@ with tab_g:
 
 with tab_f:
     st.caption(f"{snap.info.get('sector') or ''} · {snap.info.get('industry') or ''}")
-    cols = st.columns(len(CATEGORIES))
-    for col, c in zip(cols, CATEGORIES):
+    cats = list(ev.fundamentals["categories"])
+    cols = st.columns(len(cats))
+    for col, c in zip(cols, cats):
         s = ev.fundamentals["categories"][c]
         col.metric(c, f"{s:.0f}" if s is not None else "—")
+    tech = ev.fundamentals.get("tech")
+    if tech:
+        st.markdown(f"**Tehnoloogianäitajad** — ärimudel: {tech['model']} (topeltkaaluga fundamentaalskooris)")
+        st.dataframe(pd.DataFrame(tech["metrics"]), hide_index=True, width="stretch",
+                     column_config={"Skoor": score_col("Skoor")})
+        st.markdown("**Üldised näitajad**")
     st.dataframe(pd.DataFrame(ev.fundamentals["metrics"]), hide_index=True, width="stretch",
                  column_config={"Skoor": score_col("Skoor")})
 

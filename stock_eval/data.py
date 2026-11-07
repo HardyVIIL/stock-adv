@@ -10,7 +10,7 @@ INFO_KEYS = [
     "longName", "shortName", "sector", "industry", "currency", "marketCap",
     "currentPrice", "regularMarketPrice", "previousClose",
     "trailingPE", "forwardPE", "pegRatio", "trailingPegRatio", "priceToBook",
-    "enterpriseToEbitda", "returnOnEquity", "returnOnAssets", "profitMargins",
+    "enterpriseToEbitda", "enterpriseToRevenue", "returnOnEquity", "returnOnAssets", "profitMargins",
     "operatingMargins", "grossMargins", "revenueGrowth", "earningsGrowth",
     "debtToEquity", "currentRatio", "freeCashflow", "sharesOutstanding",
     "totalCash", "totalDebt", "beta", "fiftyTwoWeekHigh", "fiftyTwoWeekLow",
@@ -57,6 +57,8 @@ class Snapshot:
     fcf_history: list[float] = field(default_factory=list)  # aastane FCF, vanim -> uusim
     prices: pd.DataFrame = field(default_factory=pd.DataFrame)
     estimates: dict = field(default_factory=dict)  # analüütikute kasvuprognoosid
+    statements: dict = field(default_factory=dict)  # aastased aruanderead (vt _statements)
+    splits: list = field(default_factory=list)  # [(kuupäev, suhe)], nt 5.0 = 5:1 tükeldus
 
     @property
     def name(self) -> str:
@@ -70,16 +72,25 @@ class Snapshot:
         return p
 
 
-def _fcf_history(t: yf.Ticker) -> list[float]:
-    try:
-        cf = t.cashflow
-    except Exception:
+def _row(df: pd.DataFrame | None, name: str) -> list[float]:
+    if df is None or df.empty or name not in df.index:
         return []
-    if cf is None or cf.empty or "Free Cash Flow" not in cf.index:
-        return []
-    row = cf.loc["Free Cash Flow"].dropna()
-    row = row.sort_index()  # veerud on kuupäevad
-    return [float(v) for v in row.values]
+    return [float(v) for v in df.loc[name].dropna().sort_index().values]
+
+
+def _statements(t: yf.Ticker) -> dict[str, list[float]]:
+    """Aastased read aruannetest (vanim -> uusim): käive, brutokasum, SBC, FCF, laovarud."""
+    out: dict[str, list[float]] = {}
+    for attr, rows in (("income_stmt", {"revenue": "Total Revenue", "gross_profit": "Gross Profit"}),
+                       ("cashflow", {"sbc": "Stock Based Compensation", "fcf": "Free Cash Flow"}),
+                       ("balance_sheet", {"inventory": "Inventory"})):
+        try:
+            df = getattr(t, attr)
+        except Exception:
+            df = None
+        for key, name in rows.items():
+            out[key] = _row(df, name)
+    return out
 
 
 def fetch_snapshot(ticker: str, period: str = "2y") -> Snapshot:
@@ -97,5 +108,12 @@ def fetch_snapshot(ticker: str, period: str = "2y") -> Snapshot:
     if prices.empty and not raw.get("regularMarketPrice"):
         raise ValueError(f"Tickerit '{ticker}' ei leitud või andmed puuduvad")
     info = {k: raw.get(k) for k in INFO_KEYS}
-    return Snapshot(ticker=ticker, info=info, fcf_history=_fcf_history(t), prices=prices,
-                    estimates=_estimates(t))
+    statements = _statements(t)
+    try:
+        sp = t.splits
+        splits = [(pd.Timestamp(d).tz_localize(None), float(r)) for d, r in sp.items()] if sp is not None else []
+    except Exception:
+        splits = []
+    return Snapshot(ticker=ticker, info=info, fcf_history=statements.get("fcf", []), prices=prices,
+                    estimates=_estimates(t), statements=statements,
+                    splits=splits)
