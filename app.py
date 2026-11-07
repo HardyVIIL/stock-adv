@@ -8,10 +8,14 @@ from plotly.subplots import make_subplots
 
 from stock_eval.data import fetch_snapshot
 from stock_eval.dcf import estimate_discount_rate, estimate_growth
+from pathlib import Path
+
 from stock_eval.fundamentals import CATEGORIES
+from stock_eval.portfolio import holdings_table, parse_yahoo_csv, weighted_score
 from stock_eval.scoring import evaluate, rating
 
 st.set_page_config(page_title="Aktsiate evalueerija", page_icon="📈", layout="wide")
+PORTFOLIO_FILE = Path(__file__).parent / "portfolio.csv"  # isiklik, .gitignore's
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -30,10 +34,31 @@ def fmt_big(v: float | None) -> str:
 
 # ---------------- Külgriba ----------------
 with st.sidebar:
-    st.header("Jälgimisnimekiri")
-    raw = st.text_area("Tickerid (koma või reavahetusega)", "AAPL, MSFT, GOOGL, NVDA, ASML, KO",
-                       help="Yahoo Finance tähised, nt Tallinna börs: LHV1T.TL, Helsingi: NOKIA.HE")
-    tickers = list(dict.fromkeys(t.strip().upper() for t in raw.replace("\n", ",").split(",") if t.strip()))
+    st.header("Aktsiad")
+    source = st.radio("Allikas", ["Minu Yahoo portfell", "Käsitsi"], horizontal=True,
+                      index=0 if PORTFOLIO_FILE.exists() else 1)
+    portfolio = None
+    if source == "Minu Yahoo portfell":
+        up = st.file_uploader("Yahoo Finance eksport (quotes.csv)", type="csv",
+                              help="Yahoo Finance → My Portfolio → vali portfell → Export")
+        if up is not None:
+            PORTFOLIO_FILE.write_bytes(up.getvalue())  # jäetakse meelde järgmiseks korraks
+        if PORTFOLIO_FILE.exists():
+            try:
+                portfolio = parse_yahoo_csv(PORTFOLIO_FILE)
+                st.caption(f"Laetud {len(portfolio)} tickerit failist {PORTFOLIO_FILE.name}")
+            except Exception as e:
+                st.error(f"Faili ei õnnestunud lugeda: {e}")
+        else:
+            st.info("Laadi üles Yahoo portfelli CSV eksport.")
+        extra = st.text_input("Lisa võrdluseks tickereid (valikuline)", "")
+        tickers = (portfolio["Ticker"].tolist() if portfolio is not None else []) + \
+            [t.strip().upper() for t in extra.split(",") if t.strip()]
+    else:
+        raw = st.text_area("Tickerid (koma või reavahetusega)", "AAPL, MSFT, GOOGL, NVDA, ASML, KO",
+                           help="Yahoo Finance tähised, nt Tallinna börs: LHV1T.TL, Helsingi: NOKIA.HE")
+        tickers = [t.strip().upper() for t in raw.replace("\n", ",").split(",") if t.strip()]
+    tickers = list(dict.fromkeys(tickers))
 
     st.header("Kaalud")
     w_f = st.slider("Fundamentaalanalüüs", 0, 100, 50, 5)
@@ -78,9 +103,47 @@ if not evals:
 # ---------------- Koondtabel ----------------
 summary = pd.DataFrame([e.summary_row() for e in evals.values()]).sort_values(
     "Koondskoor", ascending=False, na_position="last")
+score_col = lambda label: st.column_config.ProgressColumn(label, min_value=0, max_value=100, format="%.0f")
+
+# ---------------- Minu portfell ----------------
+if portfolio is not None and (portfolio["Kogus"] > 0).any():
+    st.subheader("Minu portfell")
+    h = holdings_table(portfolio, {t: e.snapshot.price for t, e in evals.items()},
+                       {t: e.total for t, e in evals.items()})
+    h.insert(1, "Valuuta", h["Ticker"].map(lambda t: evals[t].snapshot.info.get("currency") if t in evals else ""))
+    h["Hinnang"] = h["Koondskoor"].map(rating)
+
+    totals = h.groupby("Valuuta")[["Investeeritud", "Turuväärtus", "Kasum/kahjum"]].sum(min_count=1)
+    cols = st.columns(len(totals) + 1)
+    for col, (cur_, row) in zip(cols, totals.iterrows()):
+        ret = row["Kasum/kahjum"] / row["Investeeritud"] if row["Investeeritud"] else None
+        col.metric(f"Portfelli väärtus ({cur_})", f"{row['Turuväärtus']:,.2f}",
+                   f"{row['Kasum/kahjum']:+,.2f} ({ret:+.1%})" if ret is not None else None)
+    ps = weighted_score(h)
+    cols[-1].metric("Portfelli koondskoor", f"{ps:.0f}" if ps is not None else "—", rating(ps), delta_color="off")
+    if len(totals) > 1:
+        st.caption("Portfellis on mitu valuutat – summad on näidatud valuutade kaupa; osakaal arvestab "
+                   "väärtusi ilma valuutakonversioonita.")
+
+    st.dataframe(h, hide_index=True, use_container_width=True, column_config={
+        "Kogus": st.column_config.NumberColumn(format="%.4g"),
+        "Keskmine ostuhind": st.column_config.NumberColumn(format="%.2f"),
+        "Investeeritud": st.column_config.NumberColumn(format="%.2f"),
+        "Hind": st.column_config.NumberColumn(format="%.2f"),
+        "Turuväärtus": st.column_config.NumberColumn(format="%.2f"),
+        "Kasum/kahjum": st.column_config.NumberColumn(format="%+.2f"),
+        "Tootlus": st.column_config.NumberColumn(format="percent"),
+        "Osakaal": st.column_config.ProgressColumn(min_value=0, max_value=1, format="percent"),
+        "Koondskoor": score_col("Koondskoor"),
+    })
+    weak = h[h["Koondskoor"] < 40]
+    if not weak.empty:
+        st.info("Nõrga koondskooriga positsioonid (<40): " + ", ".join(
+            f"{r.Ticker} ({r.Osakaal:.0%} portfellist)" for r in weak.itertuples()) +
+            " — vaata detailvaatest, milline osaskoor neid alla tõmbab.")
+    st.divider()
 
 st.subheader("Koondvaade")
-score_col = lambda label: st.column_config.ProgressColumn(label, min_value=0, max_value=100, format="%.0f")
 st.dataframe(
     summary,
     hide_index=True,

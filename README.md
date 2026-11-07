@@ -11,6 +11,20 @@ Andmed tulevad Yahoo Finance'ist (`yfinance`, API-võtit pole vaja).
 
 Avaneb <http://localhost:8501>. Külgribal saab muuta jälgimisnimekirja, meetodite kaale ja DCF eeldusi.
 
+## Oma Yahoo Finance portfell
+
+1. Ava [finance.yahoo.com](https://finance.yahoo.com) → **My Portfolio** → vali portfell.
+2. Vajuta **Export** – alla laaditakse fail `quotes.csv`.
+3. Dashboardis vali külgribal **Allikas → Minu Yahoo portfell** ja laadi fail üles.
+
+Fail salvestatakse projekti kausta nimega `portfolio.csv` (on `.gitignore`'is, GitHubi ei lähe),
+nii et järgmisel käivitamisel laetakse see automaatselt. Portfelli muutudes ekspordi ja laadi uuesti üles.
+
+Portfelli vaates näed iga positsiooni kogust, keskmist ostuhinda, turuväärtust, kasumit/kahjumit,
+osakaalu ja koondskoori ning kogu portfelli turuväärtusega kaalutud koondskoori. Mitme valuuta
+korral näidatakse summad valuutade kaupa. Ilma koguseta read (jälgimisnimekiri) hinnatakse, aga
+positsioonidena ei arvestata.
+
 ## Meetodid
 
 | Meetod | Mida hinnatakse | Moodul |
