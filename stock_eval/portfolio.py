@@ -42,22 +42,52 @@ def parse_yahoo_csv(source) -> pd.DataFrame:
     return agg.reset_index()[COLUMNS]
 
 
+def fx_symbol(currency: str, base: str) -> str:
+    """Yahoo valuutapaari tähis, nt SEK -> EUR: 'SEKEUR=X'."""
+    return f"{currency}{base}=X"
+
+
+def normalize_currency(currency: str | None) -> tuple[str | None, float]:
+    """Yahoo noteerib osa börse alamühikus (GBp = penn, ZAc = sent). Tagastab (valuuta, kordaja)."""
+    if currency in ("GBp", "GBX"):
+        return "GBP", 0.01
+    if currency in ("ZAc", "ILA"):
+        return {"ZAc": "ZAR", "ILA": "ILS"}[currency], 0.01
+    return currency, 1.0
+
+
 def holdings_table(portfolio: pd.DataFrame, prices: dict[str, float | None],
-                   scores: dict[str, float | None]) -> pd.DataFrame:
-    """Lisab portfellile turuväärtuse, kasumi/kahjumi, osakaalu ja koondskoori."""
+                   scores: dict[str, float | None], currencies: dict[str, str | None] | None = None,
+                   fx: dict[str, float] | None = None, base: str = "EUR") -> pd.DataFrame:
+    """Lisab portfellile turuväärtuse, kasumi/kahjumi, osakaalu ja koondskoori.
+
+    `currencies`: ticker -> noteerimisvaluuta; `fx`: valuuta -> kurss baasvaluutasse.
+    Osakaal ja kaalutud skoor arvutatakse baasvaluutas, et eri valuutas positsioonid oleks võrreldavad.
+    """
+    currencies = currencies or {}
+    fx = fx or {}
     df = portfolio[portfolio["Kogus"] > 0].copy()
+    df["Valuuta"] = df["Ticker"].map(lambda t: currencies.get(t) or "")
     df["Hind"] = df["Ticker"].map(prices)
     df["Turuväärtus"] = df["Kogus"] * df["Hind"]
     df["Kasum/kahjum"] = df["Turuväärtus"] - df["Investeeritud"]
     df["Tootlus"] = df["Kasum/kahjum"] / df["Investeeritud"]
-    total = df["Turuväärtus"].sum()
-    df["Osakaal"] = df["Turuväärtus"] / total if total else None
+
+    def to_base(row) -> float | None:
+        cur, mult = normalize_currency(row["Valuuta"] or base)
+        rate = 1.0 if cur == base else fx.get(cur)
+        return None if rate is None or pd.isna(row["Turuväärtus"]) else row["Turuväärtus"] * mult * rate
+
+    col = f"Väärtus ({base})"
+    df[col] = df.apply(to_base, axis=1).astype(float)
+    total = df[col].sum()
+    df["Osakaal"] = df[col] / total if total else None
     df["Koondskoor"] = df["Ticker"].map(scores)
-    return df.sort_values("Turuväärtus", ascending=False)
+    return df.sort_values(col, ascending=False, na_position="last")
 
 
 def weighted_score(holdings: pd.DataFrame) -> float | None:
-    """Portfelli koondskoor, kaalutud turuväärtusega."""
-    h = holdings.dropna(subset=["Koondskoor", "Turuväärtus"])
-    w = h["Turuväärtus"].sum()
-    return float((h["Koondskoor"] * h["Turuväärtus"]).sum() / w) if w else None
+    """Portfelli koondskoor, kaalutud osakaaluga (baasvaluutas)."""
+    h = holdings.dropna(subset=["Koondskoor", "Osakaal"])
+    w = h["Osakaal"].sum()
+    return float((h["Koondskoor"] * h["Osakaal"]).sum() / w) if w else None

@@ -35,3 +35,22 @@ def test_holdings_and_weighted_score():
     assert a["Turuväärtus"] == 4500 and a["Kasum/kahjum"] == pytest.approx(4500 - 2901)
     assert h["Osakaal"].sum() == pytest.approx(1)
     assert weighted_score(h) == pytest.approx((80 * 4500 + 40 * 3000) / 7500)
+
+
+def test_weights_use_fx_conversion():
+    p = parse_yahoo_csv(io.StringIO(YAHOO_CSV))
+    h = holdings_table(p, {"AAPL": 300.0, "LHV1T.TL": 3.0}, {"AAPL": 80, "LHV1T.TL": 40},
+                       {"AAPL": "USD", "LHV1T.TL": "EUR"}, {"USD": 0.5})
+    v = h.set_index("Ticker")["Väärtus (EUR)"]
+    assert v["AAPL"] == 2250 and v["LHV1T.TL"] == 3000
+    assert h.set_index("Ticker").loc["LHV1T.TL", "Osakaal"] == pytest.approx(3000 / 5250)
+    assert weighted_score(h) == pytest.approx((80 * 2250 + 40 * 3000) / 5250)
+
+
+def test_pence_quoted_and_missing_rate():
+    p = pd.DataFrame({"Ticker": ["X", "Y"], "Kogus": [100.0, 1.0], "Keskmine ostuhind": [None, None],
+                      "Investeeritud": [None, None]})
+    h = holdings_table(p, {"X": 200.0, "Y": 10.0}, {}, {"X": "GBp", "Y": "JPY"}, {"GBP": 1.2})
+    v = h.set_index("Ticker")["Väärtus (EUR)"]
+    assert v["X"] == pytest.approx(100 * 200 * 0.01 * 1.2)
+    assert pd.isna(v["Y"])

@@ -6,21 +6,36 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from stock_eval.data import fetch_snapshot
-from stock_eval.dcf import estimate_discount_rate, estimate_growth
 from pathlib import Path
 
+import yfinance as yf
+
+from stock_eval.data import fetch_snapshot
+from stock_eval.dcf import estimate_discount_rate, estimate_growth
 from stock_eval.fundamentals import CATEGORIES
-from stock_eval.portfolio import holdings_table, parse_yahoo_csv, weighted_score
+from stock_eval.portfolio import fx_symbol, holdings_table, normalize_currency, parse_yahoo_csv, weighted_score
 from stock_eval.scoring import evaluate, rating
 
 st.set_page_config(page_title="Aktsiate evalueerija", page_icon="📈", layout="wide")
 PORTFOLIO_FILE = Path(__file__).parent / "portfolio.csv"  # isiklik, .gitignore's
+BASE_CURRENCY = "EUR"
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load(ticker: str):
     return fetch_snapshot(ticker)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fx_rate(currency: str, base: str = BASE_CURRENCY) -> float | None:
+    """Viimane valuutakurss currency -> base Yahoo'st."""
+    if currency == base:
+        return 1.0
+    try:
+        h = yf.Ticker(fx_symbol(currency, base)).history(period="5d")
+        return float(h["Close"].dropna().iloc[-1]) if not h.empty else None
+    except Exception:
+        return None
 
 
 def fmt_big(v: float | None) -> str:
@@ -108,24 +123,32 @@ score_col = lambda label: st.column_config.ProgressColumn(label, min_value=0, ma
 # ---------------- Minu portfell ----------------
 if portfolio is not None and (portfolio["Kogus"] > 0).any():
     st.subheader("Minu portfell")
+    currencies = {t: e.snapshot.info.get("currency") for t, e in evals.items()}
+    fx = {}
+    for c in {normalize_currency(c)[0] for c in currencies.values() if c}:
+        rate = fx_rate(c)
+        if rate is not None:
+            fx[c] = rate
     h = holdings_table(portfolio, {t: e.snapshot.price for t, e in evals.items()},
-                       {t: e.total for t, e in evals.items()})
-    h.insert(1, "Valuuta", h["Ticker"].map(lambda t: evals[t].snapshot.info.get("currency") if t in evals else ""))
+                       {t: e.total for t, e in evals.items()}, currencies, fx, BASE_CURRENCY)
     h["Hinnang"] = h["Koondskoor"].map(rating)
+    val_col = f"Väärtus ({BASE_CURRENCY})"
 
-    totals = h.groupby("Valuuta")[["Investeeritud", "Turuväärtus", "Kasum/kahjum"]].sum(min_count=1)
-    cols = st.columns(len(totals) + 1)
-    for col, (cur_, row) in zip(cols, totals.iterrows()):
-        ret = row["Kasum/kahjum"] / row["Investeeritud"] if row["Investeeritud"] else None
-        col.metric(f"Portfelli väärtus ({cur_})", f"{row['Turuväärtus']:,.2f}",
-                   f"{row['Kasum/kahjum']:+,.2f} ({ret:+.1%})" if ret is not None else None)
+    # Kasum/kahjum baasvaluutas (praeguse kursiga)
+    to_base = h[val_col] / h["Turuväärtus"]
+    pl_base = (h["Kasum/kahjum"] * to_base).sum(min_count=1)
+    inv_base = (h["Investeeritud"] * to_base).sum(min_count=1)
+    c1, c2, c3 = st.columns(3)
+    c1.metric(f"Portfelli väärtus ({BASE_CURRENCY})", f"{h[val_col].sum():,.2f}")
+    c2.metric(f"Kasum/kahjum ({BASE_CURRENCY})", f"{pl_base:+,.2f}" if pd.notna(pl_base) else "—",
+              f"{pl_base / inv_base:+.1%}" if pd.notna(pl_base) and inv_base else None)
     ps = weighted_score(h)
-    cols[-1].metric("Portfelli koondskoor", f"{ps:.0f}" if ps is not None else "—", rating(ps), delta_color="off")
-    if len(totals) > 1:
-        st.caption("Portfellis on mitu valuutat – summad on näidatud valuutade kaupa; osakaal arvestab "
-                   "väärtusi ilma valuutakonversioonita.")
+    c3.metric("Portfelli koondskoor", f"{ps:.0f}" if ps is not None else "—", rating(ps), delta_color="off")
+    missing = sorted({normalize_currency(c)[0] for c in h["Valuuta"] if c} - set(fx) - {BASE_CURRENCY})
+    st.caption(f"Väärtused on teisendatud eurodesse praeguse kursiga. Kasum/kahjum ei arvesta valuutakursi "
+               f"muutust ostuhetkest." + (f" Kurss puudub: {', '.join(missing)}." if missing else ""))
 
-    st.dataframe(h, hide_index=True, use_container_width=True, column_config={
+    st.dataframe(h, hide_index=True, width="stretch", column_config={
         "Kogus": st.column_config.NumberColumn(format="%.4g"),
         "Keskmine ostuhind": st.column_config.NumberColumn(format="%.2f"),
         "Investeeritud": st.column_config.NumberColumn(format="%.2f"),
@@ -133,6 +156,7 @@ if portfolio is not None and (portfolio["Kogus"] > 0).any():
         "Turuväärtus": st.column_config.NumberColumn(format="%.2f"),
         "Kasum/kahjum": st.column_config.NumberColumn(format="%+.2f"),
         "Tootlus": st.column_config.NumberColumn(format="percent"),
+        f"Väärtus ({BASE_CURRENCY})": st.column_config.NumberColumn(format="%.2f"),
         "Osakaal": st.column_config.ProgressColumn(min_value=0, max_value=1, format="percent"),
         "Koondskoor": score_col("Koondskoor"),
     })
@@ -147,7 +171,7 @@ st.subheader("Koondvaade")
 st.dataframe(
     summary,
     hide_index=True,
-    use_container_width=True,
+    width="stretch",
     column_config={
         "Hind": st.column_config.NumberColumn(format="%.2f"),
         "Sisemine väärtus": st.column_config.NumberColumn(format="%.2f"),
@@ -174,7 +198,7 @@ if not cat_df.empty:
         fig.add_bar(name=c, x=sub["Ticker"], y=sub["Skoor"])
     fig.update_layout(barmode="group", height=320, yaxis_range=[0, 100], margin=dict(t=30, b=10),
                       title="Fundamentaalkategooriad", legend_orientation="h")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 # ---------------- Detailvaade ----------------
 st.divider()
@@ -201,7 +225,7 @@ with tab_f:
     for col, c in zip(cols, CATEGORIES):
         s = ev.fundamentals["categories"][c]
         col.metric(c, f"{s:.0f}" if s is not None else "—")
-    st.dataframe(pd.DataFrame(ev.fundamentals["metrics"]), hide_index=True, use_container_width=True,
+    st.dataframe(pd.DataFrame(ev.fundamentals["metrics"]), hide_index=True, width="stretch",
                  column_config={"Skoor": score_col("Skoor")})
 
 with tab_d:
@@ -234,7 +258,7 @@ with tab_d:
         fig.add_bar(x=[f"+{i + 1}" for i in range(len(d.projected_fcf))], y=d.projected_fcf,
                     name="Prognoositud FCF", marker_color="#2e86de")
         fig.update_layout(height=320, margin=dict(t=30, b=10), title="Vaba rahavoog", legend_orientation="h")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         # Tundlikkustabel: diskonto x terminaalne kasv
         from stock_eval.dcf import DCFAssumptions, run_dcf
@@ -252,7 +276,7 @@ with tab_d:
                 row[f"{r:.1%}"] = res.intrinsic_per_share
             grid[f"g={tg:.1%}"] = row
         st.markdown("**Tundlikkus** — sisemine väärtus aktsia kohta (veerud: diskontomäär)")
-        st.dataframe(pd.DataFrame(grid).T.style.format("{:,.2f}", na_rep="—"), use_container_width=True)
+        st.dataframe(pd.DataFrame(grid).T.style.format("{:,.2f}", na_rep="—"), width="stretch")
 
 with tab_t:
     tech = ev.technical
@@ -274,8 +298,8 @@ with tab_t:
         fig.add_trace(go.Scatter(x=df.index, y=df["MACD_signal"], name="Signaal", line=dict(width=1)), 3, 1)
         fig.update_layout(height=650, xaxis_rangeslider_visible=False, margin=dict(t=20, b=10),
                           legend_orientation="h")
-        st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(pd.DataFrame(tech["signals"]), hide_index=True, use_container_width=True,
+        st.plotly_chart(fig, width="stretch")
+        st.dataframe(pd.DataFrame(tech["signals"]), hide_index=True, width="stretch",
                      column_config={"Skoor": score_col("Skoor")})
 
 st.divider()
