@@ -14,7 +14,40 @@ INFO_KEYS = [
     "operatingMargins", "grossMargins", "revenueGrowth", "earningsGrowth",
     "debtToEquity", "currentRatio", "freeCashflow", "sharesOutstanding",
     "totalCash", "totalDebt", "beta", "fiftyTwoWeekHigh", "fiftyTwoWeekLow",
+    # analüütikute ootused
+    "targetMeanPrice", "targetMedianPrice", "targetHighPrice", "targetLowPrice",
+    "numberOfAnalystOpinions", "recommendationMean", "recommendationKey",
+    "trailingEps", "forwardEps", "epsCurrentYear", "dividendYield", "payoutRatio",
 ]
+
+
+def _estimates(t: yf.Ticker) -> dict:
+    """Analüütikute kasvuprognoosid: EPS ja käibe kasv järgmisel aastal, pikaajaline kasv (LTG)."""
+    out = {}
+
+    def cell(df, row, col):
+        try:
+            v = df.loc[row, col]
+            return float(v) if v == v else None
+        except Exception:
+            return None
+
+    try:
+        g = t.growth_estimates
+        if g is not None and not g.empty:
+            out["eps_growth_0y"] = cell(g, "0y", "stockTrend")
+            out["eps_growth_1y"] = cell(g, "+1y", "stockTrend")
+            out["ltg"] = cell(g, "LTG", "stockTrend")
+    except Exception:
+        pass
+    try:
+        r = t.revenue_estimate
+        if r is not None and not r.empty:
+            out["rev_growth_0y"] = cell(r, "0y", "growth")
+            out["rev_growth_1y"] = cell(r, "+1y", "growth")
+    except Exception:
+        pass
+    return {k: v for k, v in out.items() if v is not None}
 
 
 @dataclass
@@ -23,6 +56,7 @@ class Snapshot:
     info: dict
     fcf_history: list[float] = field(default_factory=list)  # aastane FCF, vanim -> uusim
     prices: pd.DataFrame = field(default_factory=pd.DataFrame)
+    estimates: dict = field(default_factory=dict)  # analüütikute kasvuprognoosid
 
     @property
     def name(self) -> str:
@@ -63,4 +97,5 @@ def fetch_snapshot(ticker: str, period: str = "2y") -> Snapshot:
     if prices.empty and not raw.get("regularMarketPrice"):
         raise ValueError(f"Tickerit '{ticker}' ei leitud või andmed puuduvad")
     info = {k: raw.get(k) for k in INFO_KEYS}
-    return Snapshot(ticker=ticker, info=info, fcf_history=_fcf_history(t), prices=prices)
+    return Snapshot(ticker=ticker, info=info, fcf_history=_fcf_history(t), prices=prices,
+                    estimates=_estimates(t))

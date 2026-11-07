@@ -6,9 +6,10 @@ from dataclasses import dataclass
 from .data import Snapshot
 from .dcf import DCFResult, evaluate_dcf
 from .fundamentals import evaluate_fundamentals
+from .growth import GrowthResult, evaluate_growth
 from .technical import evaluate_technical
 
-DEFAULT_WEIGHTS = {"fundamental": 0.5, "dcf": 0.3, "technical": 0.2}
+DEFAULT_WEIGHTS = {"fundamental": 0.40, "dcf": 0.20, "technical": 0.15, "growth": 0.25}
 
 
 def combine(scores: dict[str, float | None], weights: dict[str, float]) -> float | None:
@@ -39,11 +40,16 @@ class Evaluation:
     dcf: DCFResult | None
     dcf_reason: str | None
     technical: dict
+    growth: GrowthResult
+    horizon: int
     total: float | None
 
     def summary_row(self) -> dict:
         s = self.snapshot
         d = self.dcf
+        g = self.growth
+        a = g.analyst
+        p = g.projection(self.horizon)
         return {
             "Ticker": s.ticker,
             "Nimi": s.name,
@@ -55,17 +61,24 @@ class Evaluation:
             "Fundamentaal": self.fundamentals["score"],
             "DCF": d.score if d else None,
             "Tehniline": self.technical["score"],
+            "Analüütikute siht 12k": a.mean if a else None,
+            "Potentsiaal 12k": a.upside if a else None,
+            f"Oodatav hind {self.horizon}a": p.price if p else None,
+            "Oodatav tootlus a/a": p.annual_return if p else None,
+            "Kasvupotentsiaal": g.score(self.horizon),
             "Koondskoor": self.total,
             "Hinnang": rating(self.total),
         }
 
 
 def evaluate(snapshot: Snapshot, weights: dict[str, float] | None = None,
-             dcf_overrides: dict | None = None) -> Evaluation:
+             dcf_overrides: dict | None = None, horizon: int = 3,
+             growth_overrides: dict | None = None) -> Evaluation:
     weights = weights or DEFAULT_WEIGHTS
     fund = evaluate_fundamentals(snapshot.info)
     dcf, reason = evaluate_dcf(snapshot.info, snapshot.fcf_history, snapshot.price, **(dcf_overrides or {}))
     tech = evaluate_technical(snapshot.prices)
+    growth = evaluate_growth(snapshot.info, snapshot.estimates, snapshot.price, **(growth_overrides or {}))
     total = combine({"fundamental": fund["score"], "dcf": dcf.score if dcf else None,
-                     "technical": tech["score"]}, weights)
-    return Evaluation(snapshot, fund, dcf, reason, tech, total)
+                     "technical": tech["score"], "growth": growth.score(horizon)}, weights)
+    return Evaluation(snapshot, fund, dcf, reason, tech, growth, horizon, total)

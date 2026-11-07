@@ -76,10 +76,20 @@ with st.sidebar:
     tickers = list(dict.fromkeys(tickers))
 
     st.header("Kaalud")
-    w_f = st.slider("Fundamentaalanalüüs", 0, 100, 50, 5)
-    w_d = st.slider("DCF", 0, 100, 30, 5)
-    w_t = st.slider("Tehniline analüüs", 0, 100, 20, 5)
-    weights = {"fundamental": w_f, "dcf": w_d, "technical": w_t}
+    w_f = st.slider("Fundamentaalanalüüs", 0, 100, 40, 5)
+    w_d = st.slider("DCF", 0, 100, 20, 5)
+    w_t = st.slider("Tehniline analüüs", 0, 100, 15, 5)
+    w_g = st.slider("Kasvupotentsiaal", 0, 100, 25, 5)
+    weights = {"fundamental": w_f, "dcf": w_d, "technical": w_t, "growth": w_g}
+
+    st.header("Kasvupotentsiaal")
+    horizon = st.radio("Ajahorisont", [1, 3, 5], index=1, horizontal=True, format_func=lambda y: f"{y} a",
+                       help="Mille järgi arvutatakse oodatav hind, tootlus ja kasvupotentsiaali skoor")
+    g_auto = st.checkbox("Automaatne (analüütikute kasvuprognoosid)", value=True)
+    growth_over: dict = {}
+    if not g_auto:
+        growth_over["growth"] = st.slider("Kasumi (EPS) kasv 1. aastal, %", -10.0, 40.0, 12.0, 1.0) / 100
+        growth_over["exit_pe"] = st.slider("P/E horisondi lõpus", 6.0, 50.0, 20.0, 1.0)
 
     st.header("DCF eeldused")
     auto = st.checkbox("Automaatsed (kasv ajaloost, diskonto CAPM-ist)", value=True)
@@ -94,7 +104,7 @@ with st.sidebar:
         load.clear()
 
 st.title("📈 Aktsiate evalueerija")
-st.caption("Fundamentaalanalüüs · DCF hindamine · Tehniline analüüs — andmed: Yahoo Finance")
+st.caption("Fundamentaalanalüüs · DCF hindamine · Tehniline analüüs · Kasvupotentsiaal — andmed: Yahoo Finance")
 
 if not tickers:
     st.info("Lisa külgribale vähemalt üks ticker.")
@@ -106,7 +116,7 @@ progress = st.progress(0.0, "Laen andmeid…")
 for i, t in enumerate(tickers):
     progress.progress((i + 1) / len(tickers), f"Laen {t}…")
     try:
-        evals[t] = evaluate(load(t), weights, dcf_over)
+        evals[t] = evaluate(load(t), weights, dcf_over, horizon, growth_over)
     except Exception as e:  # võrgu- või andmeviga ühe tickeri puhul ei tohi kogu lehte murda
         errors.append(f"**{t}**: {e}")
 progress.empty()
@@ -133,17 +143,37 @@ if portfolio is not None and (portfolio["Kogus"] > 0).any():
                        {t: e.total for t, e in evals.items()}, currencies, fx, BASE_CURRENCY)
     h["Hinnang"] = h["Koondskoor"].map(rating)
     val_col = f"Väärtus ({BASE_CURRENCY})"
+    exp_col = f"Oodatav hind {horizon}a"
+    h["Siht 12k"] = h["Ticker"].map(lambda t: evals[t].growth.analyst.mean
+                                    if t in evals and evals[t].growth.analyst else None)
+    h["Potentsiaal 12k"] = h["Siht 12k"] / h["Hind"] - 1
+    h[exp_col] = h["Ticker"].map(lambda t: getattr(evals[t].growth.projection(horizon), "price", None)
+                                 if t in evals else None)
+    h["Oodatav tootlus a/a"] = h["Ticker"].map(
+        lambda t: getattr(evals[t].growth.projection(horizon), "annual_return", None) if t in evals else None)
 
     # Kasum/kahjum baasvaluutas (praeguse kursiga)
     to_base = h[val_col] / h["Turuväärtus"]
     pl_base = (h["Kasum/kahjum"] * to_base).sum(min_count=1)
     inv_base = (h["Investeeritud"] * to_base).sum(min_count=1)
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric(f"Portfelli väärtus ({BASE_CURRENCY})", f"{h[val_col].sum():,.2f}")
     c2.metric(f"Kasum/kahjum ({BASE_CURRENCY})", f"{pl_base:+,.2f}" if pd.notna(pl_base) else "—",
               f"{pl_base / inv_base:+.1%}" if pd.notna(pl_base) and inv_base else None)
     ps = weighted_score(h)
     c3.metric("Portfelli koondskoor", f"{ps:.0f}" if ps is not None else "—", rating(ps), delta_color="off")
+
+    def wavg(col):
+        x = h.dropna(subset=[col, "Osakaal"])
+        return (x[col] * x["Osakaal"]).sum() / x["Osakaal"].sum() if x["Osakaal"].sum() else None
+
+    up12, ret = wavg("Potentsiaal 12k"), wavg("Oodatav tootlus a/a")
+    c4.metric("Analüütikute potentsiaal 12k", f"{up12:+.1%}" if up12 is not None else "—",
+              help="Analüütikute keskmise sihthinna kaalutud potentsiaal (osakaalu järgi)")
+    c5.metric(f"Oodatav tootlus a/a ({horizon} a)", f"{ret:+.1%}" if ret is not None else "—",
+              f"≈ {h[val_col].sum() * (1 + ret) ** horizon:,.0f} {BASE_CURRENCY} {horizon} a pärast"
+              if ret is not None else None, delta_color="off",
+              help="Kasumipõhise mudeli kaalutud oodatav aastane tootlus (hinnatõus + dividend)")
     missing = sorted({normalize_currency(c)[0] for c in h["Valuuta"] if c} - set(fx) - {BASE_CURRENCY})
     st.caption(f"Väärtused on teisendatud eurodesse praeguse kursiga. Kasum/kahjum ei arvesta valuutakursi "
                f"muutust ostuhetkest." + (f" Kurss puudub: {', '.join(missing)}." if missing else ""))
@@ -158,6 +188,10 @@ if portfolio is not None and (portfolio["Kogus"] > 0).any():
         "Tootlus": st.column_config.NumberColumn(format="percent"),
         f"Väärtus ({BASE_CURRENCY})": st.column_config.NumberColumn(format="%.2f"),
         "Osakaal": st.column_config.ProgressColumn(min_value=0, max_value=1, format="percent"),
+        "Siht 12k": st.column_config.NumberColumn(format="%.2f"),
+        "Potentsiaal 12k": st.column_config.NumberColumn(format="percent"),
+        exp_col: st.column_config.NumberColumn(format="%.2f"),
+        "Oodatav tootlus a/a": st.column_config.NumberColumn(format="percent"),
         "Koondskoor": score_col("Koondskoor"),
     })
     weak = h[h["Koondskoor"] < 40]
@@ -179,6 +213,11 @@ st.dataframe(
         "Fundamentaal": score_col("Fundamentaal"),
         "DCF": score_col("DCF"),
         "Tehniline": score_col("Tehniline"),
+        "Analüütikute siht 12k": st.column_config.NumberColumn(format="%.2f"),
+        "Potentsiaal 12k": st.column_config.NumberColumn(format="percent"),
+        f"Oodatav hind {horizon}a": st.column_config.NumberColumn(format="%.2f"),
+        "Oodatav tootlus a/a": st.column_config.NumberColumn(format="percent"),
+        "Kasvupotentsiaal": score_col("Kasvupotentsiaal"),
         "Koondskoor": score_col("Koondskoor"),
     },
 )
@@ -217,7 +256,79 @@ c4.metric("Sisemine väärtus (DCF)", f"{ev.dcf.intrinsic_per_share:,.2f}" if ev
 mos = ev.dcf.margin_of_safety if ev.dcf else None
 c5.metric("Turvamarginaal", f"{mos:+.0%}" if mos is not None else "—")
 
-tab_f, tab_d, tab_t = st.tabs(["Fundamentaalanalüüs", "DCF hindamine", "Tehniline analüüs"])
+tab_g, tab_f, tab_d, tab_t = st.tabs(["Kasvupotentsiaal", "Fundamentaalanalüüs", "DCF hindamine",
+                                      "Tehniline analüüs"])
+
+with tab_g:
+    gr = ev.growth
+    a = gr.analyst
+    st.markdown("#### Analüütikute konsensus (12 kuud)")
+    if not a:
+        st.info("Analüütikute sihthinnad puuduvad (või katab aktsiat alla 3 analüütiku).")
+    else:
+        REC = {"strong_buy": "Tugev ost", "buy": "Ost", "hold": "Hoia", "underperform": "Alla turu",
+               "sell": "Müü", "strong_sell": "Tugev müük"}
+        g1, g2, g3, g4 = st.columns(4)
+        g1.metric("Keskmine sihthind", f"{a.mean:,.2f} {cur}", f"{a.upside:+.1%}")
+        g2.metric("Vahemik", f"{a.low:,.2f} – {a.high:,.2f}" if a.low and a.high else "—")
+        g3.metric("Analüütikuid", a.count)
+        g4.metric("Konsensus", REC.get(a.recommendation_key or "", a.recommendation_key or "—"),
+                  f"{a.recommendation:.2f} (1 = tugev ost, 5 = müü)" if a.recommendation else None,
+                  delta_color="off")
+        if a.low and a.high and snap.price:
+            fig = go.Figure()
+            fig.add_shape(type="line", x0=a.low, x1=a.high, y0=0, y1=0, line=dict(width=8, color="#bdc3c7"))
+            for x, name, color, pos in ((a.low, "Madalaim", "#7f8c8d", "top center"),
+                                        (a.mean, "Keskmine siht", "#2e86de", "top center"),
+                                        (a.high, "Kõrgeim", "#7f8c8d", "top center"),
+                                        (snap.price, "Praegu", "#e74c3c", "bottom center")):
+                fig.add_scatter(x=[x], y=[0], mode="markers+text", text=[f"{name}<br>{x:,.2f}"],
+                                textposition=pos, marker=dict(size=14, color=color), showlegend=False)
+            fig.update_layout(height=200, yaxis_visible=False, yaxis_range=[-1, 1],
+                              margin=dict(t=20, b=20, l=40, r=40))
+            st.plotly_chart(fig, width="stretch")
+
+    st.markdown("#### Kasumipõhine prognoos (EPS × P/E)")
+    if not gr.projections:
+        st.info(gr.model_reason or "Prognoosi ei saanud teha.")
+    else:
+        st.markdown(
+            f"**Lähtekasum** (järgmise 12 k EPS): {gr.eps0:,.2f} {cur} · **kasv**: {gr.growth:.1%} 1. aastal, "
+            f"sulandub 5 aastaga 6%-ni · **P/E**: praegu {gr.pe_now:.1f} → 5 a pärast {gr.exit_pe:.1f} "
+            f"· **dividenditootlus**: {gr.dividend_yield:.1%}")
+        if gr.growth_sources:
+            st.caption("Kasvu allikad: " + " · ".join(f"{k} {v:+.1%}" for k, v in gr.growth_sources.items()))
+        rows = [{"Horisont": f"{p.years} a", "EPS": p.eps, "Oodatav hind": p.price,
+                 "Muutus": p.price / snap.price - 1, "Tootlus a/a (koos div.)": p.annual_return}
+                for p in gr.projections]
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", column_config={
+            "EPS": st.column_config.NumberColumn(format="%.2f"),
+            "Oodatav hind": st.column_config.NumberColumn(format="%.2f"),
+            "Muutus": st.column_config.NumberColumn(format="percent"),
+            "Tootlus a/a (koos div.)": st.column_config.NumberColumn(format="percent"),
+        })
+        # Hinnarada: ajalugu + prognoos + analüütikute siht
+        hist = snap.prices["Close"].tail(504)
+        last = hist.index[-1]
+        fig = go.Figure()
+        fig.add_scatter(x=hist.index, y=hist.values, name="Hind", line=dict(color="#7f8c8d"))
+        xs = [last] + [last + pd.DateOffset(years=p.years) for p in gr.projections]
+        fig.add_scatter(x=xs, y=[snap.price] + [p.price for p in gr.projections], name="Mudeli prognoos",
+                        mode="lines+markers", line=dict(dash="dash", color="#2e86de"))
+        if a:
+            fig.add_scatter(x=[last, last + pd.DateOffset(years=1)], y=[snap.price, a.mean],
+                            name="Analüütikute siht", mode="lines+markers", line=dict(dash="dot", color="#27ae60"))
+            if a.low and a.high:
+                fig.add_scatter(x=[last + pd.DateOffset(years=1)] * 2, y=[a.low, a.high], mode="lines",
+                                line=dict(width=6, color="rgba(39,174,96,0.3)"), name="Siht vahemik")
+        fig.update_layout(height=380, margin=dict(t=30, b=10), legend_orientation="h",
+                          title=f"Hinnarada ja prognoos ({cur})")
+        st.plotly_chart(fig, width="stretch")
+    s = gr.score(horizon)
+    st.caption(f"Kasvupotentsiaali skoor ({horizon} a): {s:.0f}/100 — keskmine analüütikute 12 k potentsiaalist "
+               "(−10% → 0, +30% → 100) ja mudeli aastasest tootlusest (−5% → 0, +20% → 100)."
+               if s is not None else "Kasvupotentsiaali skoori ei saa arvutada.")
+    st.caption("Prognoosid on lihtsustatud mudelid ja analüütikute ootused, mitte garantii.")
 
 with tab_f:
     st.caption(f"{snap.info.get('sector') or ''} · {snap.info.get('industry') or ''}")
