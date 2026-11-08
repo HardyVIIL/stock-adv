@@ -85,17 +85,21 @@ class CatchUp:
 
     @property
     def verdict(self) -> str:
-        p = self.probability
-        if p is None:
-            return "— (prognoos puudub)"
-        if self.behind:
-            if p >= 0.6:
-                return "🟢 Tõenäoliselt jõuab järele"
-            if p >= 0.35:
-                return "🟡 Võib järele jõuda"
-            return "🔴 Ebatõenäoline"
+        return verdict_for(self.probability, self.behind)
+
+
+def verdict_for(p: float | None, behind: bool) -> str:
+    """Hinnang tõenäosuse järgi, et positsioon on horisondi lõpus indeksiga vähemalt võrdne."""
+    if p is None:
+        return "— (prognoos puudub)"
+    if behind:
         if p >= 0.6:
-            return "🟢 Tõenäoliselt püsib ees"
+            return "🟢 Tõenäoliselt jõuab järele"
         if p >= 0.35:
-            return "🟡 Võib edumaa kaotada"
-        return "🔴 Tõenäoliselt jääb alla"
+            return "🟡 Võib järele jõuda"
+        return "🔴 Ebatõenäoline"
+    if p >= 0.6:
+        return "🟢 Tõenäoliselt püsib ees"
+    if p >= 0.35:
+        return "🟡 Võib edumaa kaotada"
+    return "🔴 Tõenäoliselt jääb alla"

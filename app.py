@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -17,7 +18,8 @@ from plotly.subplots import make_subplots
 
 from stock_eval import benchmark as bm
 from stock_eval.data import fetch_snapshot
-from stock_eval.catchup import CatchUp
+from stock_eval import montecarlo as mc
+from stock_eval.catchup import CatchUp, verdict_for
 from stock_eval.dcf import DCFAssumptions, estimate_discount_rate, estimate_growth, run_dcf
 from stock_eval.fundamentals import CATEGORIES, TECH_CATEGORY
 from stock_eval.growth import sector_pe
@@ -139,6 +141,7 @@ with st.sidebar:
         index_return = st.slider("Indeksi oodatav tootlus edaspidi, % aastas", 0.0, 20.0, 9.0, 0.5,
                                  help="Kasutatakse järelejõudmise analüüsis. Pikaajaline aktsiaturu keskmine "
                                       "on ~7–10% aastas; Nasdaq-100 viimase 10 a keskmine on olnud kõrgem.") / 100
+        n_sims = st.select_slider("Simulatsioonide arv", [2_000, 10_000, 50_000], 10_000)
 
     if st.button("🔄 Värskenda andmeid"):
         load.clear()
@@ -428,76 +431,116 @@ def catch_up_view(cmp: pd.DataFrame, closes: pd.DataFrame):
     b5 = b[b.index >= b.index[-1] - pd.DateOffset(years=5)]
     hist_cagr = (b5.iloc[-1] / b5.iloc[0]) ** (1 / 5) - 1 if len(b5) > 200 else None
     st.markdown(f"Kas positsioon jõuab **{yrs} aastaga** järele sellele, mis sama raha oleks andnud "
-                f"**{bm.BENCHMARKS[bench]}**-is? Eeldus: indeks kasvab edaspidi **{index_return:.1%} aastas**"
+                f"**{bm.BENCHMARKS[bench]}**-is? Indeksi mediaantootlus edaspidi **{index_return:.1%} aastas**"
                 + (f" (viimase 5 a ajalugu: {hist_cagr:.1%} aastas USD-s)" if hist_cagr is not None else "")
                 + " — muuda külgribal „Võrdlusindeks”.")
-    rows, objs = [], {}
+
+    tickers = cmp["Ticker"].tolist()
+    stats, sigma_i = mc.market_stats(closes, tickers, bench)
+    positions, cus = [], {}
     for t, value, idx_val in zip(cmp["Ticker"], cmp["Väärtus €"], cmp["Indeksis oleks €"]):
         sc = {s.name: s.annual_return for s in scenario_set(evals[t].growth, yrs)} if t in evals else {}
-        cu = CatchUp(value, idx_val, index_return, yrs, sc.get("Bear"), sc.get("Base"), sc.get("Bull"))
-        objs[t] = cu
-        rows.append({"Ticker": t, "Väärtus €": value, "Indeksis oleks €": idx_val, "Vahe praegu €": cu.gap,
-                     "Vajalik tootlus a/a": cu.required_return, "Bear a/a": cu.bear, "Base a/a": cu.base,
-                     "Bull a/a": cu.bull, "Tõenäosus": cu.probability, f"Vahe {yrs} a pärast (base) €":
-                     cu.gap_after(cu.base), "Aastaid järelejõudmiseni (base)": cu.years_to_catch_up,
-                     "Hinnang": cu.verdict})
+        cus[t] = CatchUp(value, idx_val, index_return, yrs, sc.get("Bear"), sc.get("Base"), sc.get("Bull"))
+        positions.append({"ticker": t, "value": value, "index_value": idx_val, "bear": sc.get("Bear"),
+                          "base": sc.get("Base"), "bull": sc.get("Bull"), "stats": stats[t]})
+    sim = mc.simulate(positions, sigma_i, index_return, yrs, n=n_sims)
+    prob = sim.prob_ahead()
+    p10, p50, p90 = sim.percentiles()
+
+    rows = []
+    for j, t in enumerate(tickers):
+        cu, stt = cus[t], stats[t]
+        rows.append({
+            "Ticker": t, "Väärtus €": cu.value, "Indeksis oleks €": cu.index_value, "Vahe praegu €": cu.gap,
+            "Vajalik tootlus a/a": cu.required_return, "Base a/a": cu.base,
+            "Volatiilsus": stt.sigma, "Korrelatsioon": stt.rho, "Jälgimisviga": stt.tracking_error(sigma_i),
+            "Tõenäosus": prob[j], f"Vahe {yrs} a: halb (10%) €": p10[j], f"Vahe {yrs} a: mediaan €": p50[j],
+            f"Vahe {yrs} a: hea (90%) €": p90[j], "Aastaid järelejõudmiseni (base)": cu.years_to_catch_up,
+            "Hinnang": verdict_for(prob[j], cu.behind) + ("" if cu.base is not None else " ⚠️ prognoosita")
+                       + ("" if stt.estimated else " ⚠️ lühike ajalugu"),
+        })
     df = pd.DataFrame(rows)
     behind = df[df["Vahe praegu €"] < 0]
     ahead = df[df["Vahe praegu €"] >= 0]
 
+    # Portfelli tase
+    tot = sim.total
     c = st.columns(4)
-    c[0].metric("Indeksist maas", f"{len(behind)} positsiooni", f"{behind['Vahe praegu €'].sum():+,.0f} €",
-                delta_color="off")
-    likely = behind[behind["Tõenäosus"] >= 0.6]
-    c[1].metric("Neist tõenäoliselt jõuab järele", f"{len(likely)} / {len(behind)}")
-    exp_gap = df[f"Vahe {yrs} a pärast (base) €"].sum(min_count=1)
-    c[2].metric("Kogu vahe praegu", f"{df['Vahe praegu €'].sum():+,.0f} €")
-    c[3].metric(f"Kogu vahe {yrs} a pärast (base)", f"{exp_gap:+,.0f} €" if pd.notna(exp_gap) else "—",
-                help="Kui kõik positsioonid kulgevad base-stsenaariumi järgi ja indeks eeldatud tempos")
+    c[0].metric("Kogu vahe praegu", f"{df['Vahe praegu €'].sum():+,.0f} €")
+    c[1].metric(f"Vahe {yrs} a pärast (mediaan)", f"{np.median(tot):+,.0f} €",
+                f"80%: {np.percentile(tot, 10):+,.0f} … {np.percentile(tot, 90):+,.0f} €", delta_color="off",
+                help="Kogu portfelli jaotus on paremale kaldu (kõikuvad aktsiad võivad mitmekordistuda), seega on "
+                     "selle mediaan suurem kui positsioonide mediaanide summa.")
+    c[2].metric(f"Tõenäosus, et {yrs} a pärast ees", f"{(tot >= 0).mean():.0%}",
+                help="Kõikide positsioonide summa vs sama raha indeksis, ühises simulatsioonis")
+    likely = int((behind["Tõenäosus"] >= 0.6).sum())
+    c[3].metric("Maas olevatest jõuab tõenäoliselt järele", f"{likely} / {len(behind)}")
 
-    plot = df.dropna(subset=["Base a/a", "Vajalik tootlus a/a"]).sort_values("Vahe praegu €", ascending=False)
-    if not plot.empty:
-        fig = go.Figure()
-        fig.add_bar(y=plot["Ticker"], x=plot["Bull a/a"] - plot["Bear a/a"], base=plot["Bear a/a"], orientation="h",
-                    marker_color="rgba(46,134,222,0.22)", name="Bear … bull", hoverinfo="skip")
-        fig.add_scatter(y=plot["Ticker"], x=plot["Base a/a"], mode="markers", name="Base",
-                        marker=dict(color=BLUE, size=10, symbol="diamond"))
-        fig.add_scatter(y=plot["Ticker"], x=plot["Vajalik tootlus a/a"], mode="markers", name="Vajalik järelejõudmiseks",
-                        marker=dict(color=[RED if v < 0 else GREEN for v in plot["Vahe praegu €"]], size=16,
-                                    symbol="line-ns", line=dict(width=4, color=[RED if v < 0 else GREEN
-                                                                                for v in plot["Vahe praegu €"]])),
-                        hovertemplate="%{y}: vaja %{x:+.1%} a/a<extra></extra>")
-        fig.add_vline(x=index_return, line_dash="dot", line_color=GREY,
-                      annotation_text=f"indeks {index_return:.0%}", annotation_position="top")
-        fig.update_layout(height=max(360, 26 * len(plot)), margin=dict(t=50, b=10), legend_orientation="h",
-                          xaxis_tickformat="+.0%", yaxis_autorange="reversed",
-                          title=f"Vajalik aastatootlus (kriips) vs aktsia stsenaariumid, {yrs} a")
-        st.plotly_chart(fig, width="stretch")
-        st.caption("🔴 kriips = indeksist maas oleva positsiooni vajalik tootlus järelejõudmiseks; 🟢 kriips = ees oleva "
-                   "positsiooni tootlus, millest alla jäädes edumaa kaob. Kui kriips on sinise vahemiku sees vasakul, "
-                   "on järelejõudmine tõenäoline; kui paremal või väljas, ebatõenäoline.")
+    lo_q, hi_q = np.percentile(tot, [1, 99])
+    fig = go.Figure(go.Histogram(x=tot[(tot >= lo_q) & (tot <= hi_q)], nbinsx=80, marker_color=BLUE, opacity=0.75,
+                                 hovertemplate="%{x:+,.0f} €: %{y} simulatsiooni<extra></extra>"))
+    fig.add_vline(x=0, line_color=GREY, line_dash="dot", annotation_text="võrdne indeksiga")
+    for q, lbl in ((10, "10%"), (50, "mediaan"), (90, "90%")):
+        fig.add_vline(x=float(np.percentile(tot, q)), line_color="#2c3e50", line_width=1,
+                      annotation_text=lbl, annotation_position="top")
+    fig.update_layout(height=280, margin=dict(t=40, b=10), showlegend=False, xaxis_tickformat="+,.0f",
+                      title=f"Kogu portfelli vahe indeksiga {yrs} a pärast — {n_sims:,} simulatsiooni (€, "
+                            "äärmised 1% mõlemalt poolt peidetud)")
+    st.plotly_chart(fig, width="stretch")
+
+    # Positsioonide vahemikud
+    plot = df.sort_values("Vahe praegu €")
+    fig = go.Figure()
+    fig.add_bar(y=plot["Ticker"], x=plot[f"Vahe {yrs} a: hea (90%) €"] - plot[f"Vahe {yrs} a: halb (10%) €"],
+                base=plot[f"Vahe {yrs} a: halb (10%) €"], orientation="h", marker_color="rgba(46,134,222,0.25)",
+                name=f"10…90% vahemik {yrs} a pärast", hoverinfo="skip")
+    fig.add_scatter(y=plot["Ticker"], x=plot[f"Vahe {yrs} a: mediaan €"], mode="markers", name="Mediaan",
+                    marker=dict(color=BLUE, size=10, symbol="diamond"))
+    fig.add_scatter(y=plot["Ticker"], x=plot["Vahe praegu €"], mode="markers", name="Praegu",
+                    marker=dict(color="#2c3e50", size=9, symbol="circle-open", line_width=2))
+    fig.add_vline(x=0, line_color=GREY, line_dash="dot")
+    fig.update_layout(height=max(360, 26 * len(plot)), margin=dict(t=50, b=10), legend_orientation="h",
+                      xaxis_tickformat="+,.0f", title=f"Vahe indeksiga (€): praegu ja {yrs} a pärast")
+    st.plotly_chart(fig, width="stretch")
+    st.caption("Ring = praegune vahe; romb = simulatsioonide mediaan; riba = 80% tõenäosusega vahemik. Mida laiem "
+               "riba, seda kõikuvam aktsia (või ebakindlam kasvuprognoos) võrreldes indeksiga.")
 
     cfg = {"Väärtus €": NUM0, "Indeksis oleks €": NUM0, "Vahe praegu €": st.column_config.NumberColumn(format="%+.0f"),
-           "Vajalik tootlus a/a": PCT, "Bear a/a": PCT, "Base a/a": PCT, "Bull a/a": PCT,
-           "Tõenäosus": st.column_config.ProgressColumn(min_value=0, max_value=1, format="percent"),
-           f"Vahe {yrs} a pärast (base) €": st.column_config.NumberColumn(format="%+.0f"),
+           "Vajalik tootlus a/a": PCT, "Base a/a": PCT, "Volatiilsus": PCT,
+           "Korrelatsioon": st.column_config.NumberColumn(format="%.2f"), "Jälgimisviga": PCT,
+           "Tõenäosus": st.column_config.ProgressColumn(min_value=0, max_value=1, format="percent",
+                                                        help="Simuleeritud tõenäosus olla horisondi lõpus indeksiga "
+                                                             "vähemalt võrdne"),
+           f"Vahe {yrs} a: halb (10%) €": st.column_config.NumberColumn(format="%+.0f"),
+           f"Vahe {yrs} a: mediaan €": st.column_config.NumberColumn(format="%+.0f"),
+           f"Vahe {yrs} a: hea (90%) €": st.column_config.NumberColumn(format="%+.0f"),
            "Aastaid järelejõudmiseni (base)": st.column_config.NumberColumn(format="%.1f")}
-    st.markdown("**Indeksist maas olevad positsioonid**")
+    st.markdown("**Indeksist maas olevad positsioonid** — kas jõuavad järele?")
     st.dataframe(behind.sort_values("Tõenäosus", ascending=False), hide_index=True, width="stretch",
                  column_config=cfg)
-    if not behind.empty:
-        best = behind.dropna(subset=["Tõenäosus"]).sort_values("Tõenäosus", ascending=False)
-        if not best.empty:
-            hi, lo = best.iloc[0], best.iloc[-1]
-            st.info(f"**Parim võimalus järele jõuda:** {hi['Ticker']} (vaja {hi['Vajalik tootlus a/a']:+.1%} a/a, base "
-                    f"{hi['Base a/a']:+.1%}, ~{hi['Tõenäosus']:.0%}). **Kõige raskem:** {lo['Ticker']} (vaja "
-                    f"{lo['Vajalik tootlus a/a']:+.1%} a/a, base {lo['Base a/a']:+.1%}, ~{lo['Tõenäosus']:.0%}).")
-    with st.expander(f"Indeksist ees olevad positsioonid ({len(ahead)}) — kas edumaa püsib?"):
-        st.dataframe(ahead.sort_values("Tõenäosus", ascending=False), hide_index=True, width="stretch",
-                     column_config=cfg)
-    st.caption("Tõenäosus on ligikaudne: bear/base/bull loetakse jaotuse 15./50./85. protsentiiliks. Valuutakursside "
-               "edasist muutust ei arvestata. Tulemustasu aktsiad on välja jäetud (kui külgribal pole teisiti valitud). "
-               "See näitab mudeli ootust, mitte soovitust hoida või müüa.")
+    best = behind.sort_values("Tõenäosus", ascending=False)
+    if len(best) >= 2:
+        hi, lo = best.iloc[0], best.iloc[-1]
+        st.info(f"**Parim võimalus järele jõuda:** {hi['Ticker']} (~{hi['Tõenäosus']:.0%}). **Kõige raskem:** "
+                f"{lo['Ticker']} (~{lo['Tõenäosus']:.0%}).")
+    st.markdown("**Indeksist ees olevad positsioonid** — kas edumaa püsib?")
+    st.dataframe(ahead.sort_values("Tõenäosus", ascending=False), hide_index=True, width="stretch",
+                 column_config=cfg)
+    with st.expander("Kuidas simulatsioon töötab?"):
+        st.markdown(f"""
+- **Ootus:** aktsia mediaanne aastatootlus = base-stsenaarium (kasumi kasv + P/E muutus + dividend). Kasvuprognoosi
+  ebakindlus (bear/bull = 15./85. protsentiil) ja ajalooline kõikumine kirjeldavad suuresti sama asja, seega
+  kasutatakse neist **suuremat**, mitte summat.
+  Prognoosita positsioonidel eeldatakse indeksiga sama mediaantootlust.
+- **Kõikumine:** iga aktsia volatiilsus ja korrelatsioon indeksiga viimase 3 aasta nädalatootlustest
+  (indeksi volatiilsus {sigma_i:.0%}), tõmmatud poole võrra pikaajalise taseme (35%) poole, sest viimaste
+  aastate äärmuslik kõikumine ei püsi tavaliselt 5 aastat. Alla 1 a ajalooga aktsiatel 40% ja 0,6.
+- **Seos:** turuliikumine on kõigile aktsiatele ja indeksile ühine — kui Nasdaq langeb, langevad ka sinu
+  tehnoloogiaaktsiad. Järelejõudmist mõjutab ainult see osa, mis liigub indeksist erinevalt (**jälgimisviga**).
+- **Simulatsioone:** {n_sims:,}, horisondi lõppväärtus otse (geomeetriline Browni liikumine).
+- Ei arvesta: valuutakursside edasist muutust, makse, tehinguid. Tulemus on mudeli eelduste peegeldus, mitte
+  ennustus ega soovitus hoida/müüa.
+""")
 
 
 # ====================================================================== 📋 võrdlus

@@ -57,8 +57,11 @@ Portfelli vaate all on kaks võrdlust (indeks valitakse külgribalt: QQQ, XLK, S
 
 - **Järelejõudmine** – kas indeksist maas olev positsioon jõuab 3/5/10 aastaga järele (ja kas ees olev püsib ees)?
   Vajalik aastatootlus = (indeksis oleks / praegu)^(1/N) × (1 + indeksi oodatav tootlus) − 1, mida võrreldakse
-  aktsia bear/base/bull aastatootlusega. Tõenäosus on ligikaudne (stsenaariumid = 15./50./85. protsentiil).
-  Indeksi oodatava tootluse saab külgribal muuta (vaikimisi 9% aastas).
+  aktsia stsenaariumidega. **Tõenäosus tuleb Monte Carlo simulatsioonist** (`stock_eval/montecarlo.py`):
+  ootus = base-stsenaarium; kõikumine = 3 a nädalatootluste volatiilsus (poole võrra 35% poole tõmmatud) või
+  kasvuprognoosi ebakindlus (bear/bull = 15./85. protsentiil), kumb suurem; korrelatsioon indeksiga ühefaktorilise
+  mudeliga (turg on kõigile ühine). Tulemuseks iga positsiooni ja kogu portfelli tõenäosus ning 10/50/90%
+  vahemik. Indeksi oodatav tootlus ja simulatsioonide arv on külgribal.
 
 **0-hinnaga read:** kui rida jääb aktsia tükelduse lähedale (−5…+45 päeva), loetakse see tükelduse kirjeks.
 Muud 0-hinnaga read (nt tulemustasuna saadud aktsiad) jäetakse võrdlusest vaikimisi välja, sest need pole
