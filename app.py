@@ -17,11 +17,13 @@ from plotly.subplots import make_subplots
 
 from stock_eval import benchmark as bm
 from stock_eval.data import fetch_snapshot
+from stock_eval.catchup import CatchUp
 from stock_eval.dcf import DCFAssumptions, estimate_discount_rate, estimate_growth, run_dcf
 from stock_eval.fundamentals import CATEGORIES, TECH_CATEGORY
 from stock_eval.growth import sector_pe
 from stock_eval.portfolio import (aggregate_lots, apply_splits, fx_symbol, holdings_table, normalize_currency,
                                   read_lots, weighted_score)
+from stock_eval.scenarios import scenarios as scenario_set
 from stock_eval.scoring import evaluate, rating
 
 st.set_page_config(page_title="Aktsiate evalueerija", page_icon="📈", layout="wide")
@@ -134,6 +136,9 @@ with st.sidebar:
                                      default=[b for b in ("SPY",) if b != bench], format_func=bm.BENCHMARKS.get)
         include_received = st.checkbox("Arvesta tulemustasu / tasuta saadud aktsiaid", value=False,
                                        help="0-hinnaga read, mis pole tükeldused.")
+        index_return = st.slider("Indeksi oodatav tootlus edaspidi, % aastas", 0.0, 20.0, 9.0, 0.5,
+                                 help="Kasutatakse järelejõudmise analüüsis. Pikaajaline aktsiaturu keskmine "
+                                      "on ~7–10% aastas; Nasdaq-100 viimase 10 a keskmine on olnud kõrgem.") / 100
 
     if st.button("🔄 Värskenda andmeid"):
         load.clear()
@@ -358,8 +363,11 @@ def benchmark_section(h: pd.DataFrame):
         st.warning(str(e))
         return
 
-    view = st.radio("Vaade", ["Minu ostud vs indeks", "Praeguse koosseisu ajalugu"], horizontal=True,
-                    label_visibility="collapsed")
+    view = st.radio("Vaade", ["Minu ostud vs indeks", "Järelejõudmine", "Praeguse koosseisu ajalugu"],
+                    horizontal=True, label_visibility="collapsed")
+    if view == "Järelejõudmine":
+        catch_up_view(cmp, closes)
+        return
     if view == "Minu ostud vs indeks":
         if cmp.empty:
             st.info("Võrdlust ei saanud teha.")
@@ -408,6 +416,88 @@ def benchmark_section(h: pd.DataFrame):
         st.dataframe(stats, width="stretch", column_config={c: PCT for c in stats.columns})
         st.caption("Praegused osakaalud kogu perioodi vältel – mitte sinu tegelikud tehingud. Tagantjärele tarkuse "
                    "viga: portfellis on sageli need aktsiad, mis on hästi läinud.")
+
+
+def catch_up_view(cmp: pd.DataFrame, closes: pd.DataFrame):
+    if cmp.empty:
+        st.info("Võrdlust ei saanud teha.")
+        return
+    yrs = st.radio("Horisont", [3, 5, 10], index=1, horizontal=True, format_func=lambda y: f"{y} a",
+                   key="catch_years")
+    b = closes[bench].dropna()
+    b5 = b[b.index >= b.index[-1] - pd.DateOffset(years=5)]
+    hist_cagr = (b5.iloc[-1] / b5.iloc[0]) ** (1 / 5) - 1 if len(b5) > 200 else None
+    st.markdown(f"Kas positsioon jõuab **{yrs} aastaga** järele sellele, mis sama raha oleks andnud "
+                f"**{bm.BENCHMARKS[bench]}**-is? Eeldus: indeks kasvab edaspidi **{index_return:.1%} aastas**"
+                + (f" (viimase 5 a ajalugu: {hist_cagr:.1%} aastas USD-s)" if hist_cagr is not None else "")
+                + " — muuda külgribal „Võrdlusindeks”.")
+    rows, objs = [], {}
+    for t, value, idx_val in zip(cmp["Ticker"], cmp["Väärtus €"], cmp["Indeksis oleks €"]):
+        sc = {s.name: s.annual_return for s in scenario_set(evals[t].growth, yrs)} if t in evals else {}
+        cu = CatchUp(value, idx_val, index_return, yrs, sc.get("Bear"), sc.get("Base"), sc.get("Bull"))
+        objs[t] = cu
+        rows.append({"Ticker": t, "Väärtus €": value, "Indeksis oleks €": idx_val, "Vahe praegu €": cu.gap,
+                     "Vajalik tootlus a/a": cu.required_return, "Bear a/a": cu.bear, "Base a/a": cu.base,
+                     "Bull a/a": cu.bull, "Tõenäosus": cu.probability, f"Vahe {yrs} a pärast (base) €":
+                     cu.gap_after(cu.base), "Aastaid järelejõudmiseni (base)": cu.years_to_catch_up,
+                     "Hinnang": cu.verdict})
+    df = pd.DataFrame(rows)
+    behind = df[df["Vahe praegu €"] < 0]
+    ahead = df[df["Vahe praegu €"] >= 0]
+
+    c = st.columns(4)
+    c[0].metric("Indeksist maas", f"{len(behind)} positsiooni", f"{behind['Vahe praegu €'].sum():+,.0f} €",
+                delta_color="off")
+    likely = behind[behind["Tõenäosus"] >= 0.6]
+    c[1].metric("Neist tõenäoliselt jõuab järele", f"{len(likely)} / {len(behind)}")
+    exp_gap = df[f"Vahe {yrs} a pärast (base) €"].sum(min_count=1)
+    c[2].metric("Kogu vahe praegu", f"{df['Vahe praegu €'].sum():+,.0f} €")
+    c[3].metric(f"Kogu vahe {yrs} a pärast (base)", f"{exp_gap:+,.0f} €" if pd.notna(exp_gap) else "—",
+                help="Kui kõik positsioonid kulgevad base-stsenaariumi järgi ja indeks eeldatud tempos")
+
+    plot = df.dropna(subset=["Base a/a", "Vajalik tootlus a/a"]).sort_values("Vahe praegu €", ascending=False)
+    if not plot.empty:
+        fig = go.Figure()
+        fig.add_bar(y=plot["Ticker"], x=plot["Bull a/a"] - plot["Bear a/a"], base=plot["Bear a/a"], orientation="h",
+                    marker_color="rgba(46,134,222,0.22)", name="Bear … bull", hoverinfo="skip")
+        fig.add_scatter(y=plot["Ticker"], x=plot["Base a/a"], mode="markers", name="Base",
+                        marker=dict(color=BLUE, size=10, symbol="diamond"))
+        fig.add_scatter(y=plot["Ticker"], x=plot["Vajalik tootlus a/a"], mode="markers", name="Vajalik järelejõudmiseks",
+                        marker=dict(color=[RED if v < 0 else GREEN for v in plot["Vahe praegu €"]], size=16,
+                                    symbol="line-ns", line=dict(width=4, color=[RED if v < 0 else GREEN
+                                                                                for v in plot["Vahe praegu €"]])),
+                        hovertemplate="%{y}: vaja %{x:+.1%} a/a<extra></extra>")
+        fig.add_vline(x=index_return, line_dash="dot", line_color=GREY,
+                      annotation_text=f"indeks {index_return:.0%}", annotation_position="top")
+        fig.update_layout(height=max(360, 26 * len(plot)), margin=dict(t=50, b=10), legend_orientation="h",
+                          xaxis_tickformat="+.0%", yaxis_autorange="reversed",
+                          title=f"Vajalik aastatootlus (kriips) vs aktsia stsenaariumid, {yrs} a")
+        st.plotly_chart(fig, width="stretch")
+        st.caption("🔴 kriips = indeksist maas oleva positsiooni vajalik tootlus järelejõudmiseks; 🟢 kriips = ees oleva "
+                   "positsiooni tootlus, millest alla jäädes edumaa kaob. Kui kriips on sinise vahemiku sees vasakul, "
+                   "on järelejõudmine tõenäoline; kui paremal või väljas, ebatõenäoline.")
+
+    cfg = {"Väärtus €": NUM0, "Indeksis oleks €": NUM0, "Vahe praegu €": st.column_config.NumberColumn(format="%+.0f"),
+           "Vajalik tootlus a/a": PCT, "Bear a/a": PCT, "Base a/a": PCT, "Bull a/a": PCT,
+           "Tõenäosus": st.column_config.ProgressColumn(min_value=0, max_value=1, format="percent"),
+           f"Vahe {yrs} a pärast (base) €": st.column_config.NumberColumn(format="%+.0f"),
+           "Aastaid järelejõudmiseni (base)": st.column_config.NumberColumn(format="%.1f")}
+    st.markdown("**Indeksist maas olevad positsioonid**")
+    st.dataframe(behind.sort_values("Tõenäosus", ascending=False), hide_index=True, width="stretch",
+                 column_config=cfg)
+    if not behind.empty:
+        best = behind.dropna(subset=["Tõenäosus"]).sort_values("Tõenäosus", ascending=False)
+        if not best.empty:
+            hi, lo = best.iloc[0], best.iloc[-1]
+            st.info(f"**Parim võimalus järele jõuda:** {hi['Ticker']} (vaja {hi['Vajalik tootlus a/a']:+.1%} a/a, base "
+                    f"{hi['Base a/a']:+.1%}, ~{hi['Tõenäosus']:.0%}). **Kõige raskem:** {lo['Ticker']} (vaja "
+                    f"{lo['Vajalik tootlus a/a']:+.1%} a/a, base {lo['Base a/a']:+.1%}, ~{lo['Tõenäosus']:.0%}).")
+    with st.expander(f"Indeksist ees olevad positsioonid ({len(ahead)}) — kas edumaa püsib?"):
+        st.dataframe(ahead.sort_values("Tõenäosus", ascending=False), hide_index=True, width="stretch",
+                     column_config=cfg)
+    st.caption("Tõenäosus on ligikaudne: bear/base/bull loetakse jaotuse 15./50./85. protsentiiliks. Valuutakursside "
+               "edasist muutust ei arvestata. Tulemustasu aktsiad on välja jäetud (kui külgribal pole teisiti valitud). "
+               "See näitab mudeli ootust, mitte soovitust hoida või müüa.")
 
 
 # ====================================================================== 📋 võrdlus

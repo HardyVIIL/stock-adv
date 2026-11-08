@@ -55,6 +55,11 @@ Portfelli vaate all on kaks võrdlust (indeks valitakse külgribalt: QQQ, XLK, S
   koos aastase tootluse ja suurima langusega. NB! Sellel on tagantjärele tarkuse viga: praegu portfellis olevad
   aktsiad on sageli need, mis on hästi läinud.
 
+- **Järelejõudmine** – kas indeksist maas olev positsioon jõuab 3/5/10 aastaga järele (ja kas ees olev püsib ees)?
+  Vajalik aastatootlus = (indeksis oleks / praegu)^(1/N) × (1 + indeksi oodatav tootlus) − 1, mida võrreldakse
+  aktsia bear/base/bull aastatootlusega. Tõenäosus on ligikaudne (stsenaariumid = 15./50./85. protsentiil).
+  Indeksi oodatava tootluse saab külgribal muuta (vaikimisi 9% aastas).
+
 **0-hinnaga read:** kui rida jääb aktsia tükelduse lähedale (−5…+45 päeva), loetakse see tükelduse kirjeks.
 Muud 0-hinnaga read (nt tulemustasuna saadud aktsiad) jäetakse võrdlusest vaikimisi välja, sest need pole
 ostuotsused (külgribalt saab kaasata).
