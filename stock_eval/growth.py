@@ -5,7 +5,8 @@ Mudel (EPS × P/E):
   * Kasv = analüütikute EPS- ja käibe kasvuprognooside keskmine (varuna TTM käibe kasv),
     piiratud -10%..30%, ja sulandub 5 aastaga lineaarselt 6%-ni (kiire kasv ei kesta igavesti).
   * P/E liigub 5 aastaga praeguselt (hind / EPS) poole võrra sektori tüüpilise P/E suunas
-    (praegune piiratud 6..40) — erandlikult kõrged ja madalad kordajad kipuvad normaliseeruma.
+    (praegune piiratud 6..40; tõus kuni 1,5×) — erandlikult kõrged ja madalad kordajad kipuvad
+    normaliseeruma.
   * Oodatav hind aastal n = EPS_n × P/E_n; aastane tootlus lisab dividenditootluse.
 """
 from __future__ import annotations
@@ -224,7 +225,8 @@ def exit_multiple(info: dict, pe_now: float | None = None) -> float:
     ref = sector_pe(info)
     if pe is None or pe <= 0:
         return ref
-    return (min(40.0, max(6.0, pe)) + ref) / 2
+    # P/E tõus piiratud 1,5-kordseks: väga madal P/E peegeldab sageli riske, mida turg näeb
+    return min((min(40.0, max(6.0, pe)) + ref) / 2, pe * 1.5)
 
 
 def pe_path(pe_now: float, pe_end: float, years: int) -> list[float]:

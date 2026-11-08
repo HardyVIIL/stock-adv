@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 
 from .data import Snapshot
 from .dcf import DCFResult, evaluate_dcf
@@ -44,6 +45,11 @@ class Evaluation:
     horizon: int
     total: float | None
 
+    @cached_property
+    def bullbear(self):
+        from .scenarios import analyze
+        return analyze(self, self.horizon)
+
     def summary_row(self) -> dict:
         s = self.snapshot
         d = self.dcf
@@ -67,9 +73,18 @@ class Evaluation:
             f"Oodatav hind {self.horizon}a": p.price if p else None,
             "Oodatav tootlus a/a": p.annual_return if p else None,
             "Kasvupotentsiaal": g.score(self.horizon),
+            "Bull/bear": self.bullbear.balance,
+            "Vaade": self.bullbear.verdict,
+            f"Bear {self.horizon}a": _chg(self.bullbear.scenario("Bear")),
+            f"Bull {self.horizon}a": _chg(self.bullbear.scenario("Bull")),
+            "Tulu/risk": self.bullbear.reward_risk,
             "Koondskoor": self.total,
             "Hinnang": rating(self.total),
         }
+
+
+def _chg(scn):
+    return scn.change if scn else None
 
 
 def evaluate(snapshot: Snapshot, weights: dict[str, float] | None = None,

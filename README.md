@@ -11,6 +11,25 @@ Andmed tulevad Yahoo Finance'ist (`yfinance`, API-võtit pole vaja).
 
 Avaneb <http://localhost:8501>. Külgribal saab muuta jälgimisnimekirja, meetodite kaale ja DCF eeldusi.
 
+## Lehe ülesehitus
+
+| Sakk | Sisu |
+|---|---|
+| 💼 **Minu portfell** | Väärtus, kasum, koondskoor; bear/base/bull väärtus valitud horisondil; alamsakid: positsioonid, bull/bear vahemikud, kasvu allikad, võrdlus indeksiga |
+| 📋 **Aktsiate võrdlus** | Riski/tulu kaart (bear vs bull), koondtabel (kõik veerud lülitiga), fundamentaalkategooriad |
+| 🔍 **Aktsia analüüs** | Bull vs bear kokkuvõte (osaskoorid, argumendid poolt ja vastu, stsenaariumid, hinnarada), kasvupotentsiaal, fundamentaal, DCF, tehniline |
+
+Ajahorisont (1/3/5 a) on külgriba ülaosas ja kehtib kõikjal; muud seaded on kokkuvolditavates gruppides.
+
+## Bull / bear analüüs
+
+- **Stsenaariumid** (sama EPS × P/E mudel): bear = kasv ½ −2 %-p ja P/E −30% (mitte kunagi kõrgem kui praegu),
+  base = mudel, bull = kasv ×1,25 +2 %-p ja P/E +20%. Tõenäosused 25/50/25 → kaalutud oodatav hind.
+  **Tulu/risk** = bull tõus / bear langus (>2 soodne asümmeetria).
+- **Argumendid** pannakse automaatselt kokku näitajatest (analüütikud, kasv, Rule of 40, SBC, marginaalid,
+  laovarud, P/E vs sektor, PEG, DCF, võlg, tagasiostud/lahjendus, dividend, trend, RSI, volatiilsus);
+  olulisemad kaaluvad rohkem. **Vaade** = argumentide tasakaal: ≥65 pigem bullish, ≤35 pigem bearish.
+
 ## Oma Yahoo Finance portfell
 
 1. Ava [finance.yahoo.com](https://finance.yahoo.com) → **My Portfolio** → vali portfell.
@@ -40,8 +59,9 @@ Portfelli vaate all on kaks võrdlust (indeks valitakse külgribalt: QQQ, XLK, S
 Muud 0-hinnaga read (nt tulemustasuna saadud aktsiad) jäetakse võrdlusest vaikimisi välja, sest need pole
 ostuotsused (külgribalt saab kaasata).
 
-**Tükeldused:** kui Yahoo andmetes on tükeldus, mida failis pole märgitud, korrigeeritakse kogused ja
-ostuhinnad automaatselt ning dashboard näitab selle kohta märget.
+**Tükeldused:** kui tükeldus on failis märgitud 0-hinnaga reaga, ei muudeta midagi. Muidu võrreldakse iga
+tükeldusele eelneva ostu hinda tolle päeva (tükeldustega korrigeeritud) turuhinnaga: kui ostuhind on juba
+ümber arvutatud, jääb rida puutumata, muidu korrigeeritakse kogus ja hind automaatselt (dashboard näitab märget).
 
 ## Meetodid
 

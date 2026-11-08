@@ -70,3 +70,15 @@ def test_composition_history_and_drawdown():
     assert h["Minu portfell"].iloc[-1] == pytest.approx(100)
     assert h.iloc[0].tolist() == [100.0, 100.0]
     assert max_drawdown(pd.Series([100, 120, 60, 90])) == pytest.approx(-0.5)
+
+
+def test_apply_splits_detects_already_adjusted_lots_by_price():
+    # NOW: kasutaja on 2022. a ostu ise ümber arvutanud (10 @ 102), 2024. a ost on korrigeerimata (2 @ 730)
+    l = lots([("NOW", D("2022-01-25"), 10, 102.0, 0.0), ("NOW", D("2024-05-15"), 2, 730.0, 0.0),
+              ("NOW", D("2025-12-18"), 15, 148.0, 0.0)])          # tükelduse päeval -> juba uus hind
+    splits = {"NOW": [(D("2025-12-18 09:30"), 5.0)]}
+    market = {D("2022-01-25"): 104.0, D("2024-05-15"): 148.0}       # tükeldustega korrigeeritud hinnad
+    out, notes = apply_splits(l, splits, price_at=lambda t, d: market.get(d))
+    assert out["Kogus"].tolist() == [10, 10, 15]
+    assert out["Ostuhind"].tolist() == pytest.approx([102.0, 146.0, 148.0])
+    assert len(notes) == 1 and "1 ostureal" in notes[0]

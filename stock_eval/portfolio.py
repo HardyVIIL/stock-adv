@@ -37,30 +37,59 @@ def read_lots(source) -> pd.DataFrame:
     }).reset_index(drop=True)
 
 
+def _naive_day(ts) -> pd.Timestamp:
+    ts = pd.Timestamp(ts)
+    return (ts.tz_localize(None) if ts.tzinfo else ts).normalize()
+
+
 def apply_splits(lots: pd.DataFrame, splits: dict[str, list[tuple[pd.Timestamp, float]]],
-                 handled_window_days: int = 45) -> tuple[pd.DataFrame, list[str]]:
+                 price_at=None, handled_window_days: int = 45) -> tuple[pd.DataFrame, list[str]]:
     """Korrigeerib aktsiate tükeldused, mida failis pole märgitud.
 
-    Kui pärast tükeldust (−5…+45 päeva) on samal tickeril 0-hinnaga rida, eeldame, et kasutaja on
-    tükelduse ise lisanud (Yahoo tavapärane viis) ja jätame selle puutumata. Muidu korrutatakse
-    tükeldusele eelnevate ostude kogus suhtega ja ostuhind jagatakse sellega.
+    Iga tükeldusele eelnev ost (ostupäev < tükelduse päev) vaadatakse eraldi:
+      1. Kui `price_at(ticker, kuupäev)` annab tolle päeva tükeldustega korrigeeritud turuhinna, siis
+         võrreldakse sellega ostuhinda: kui ostuhind on lähemal korrigeeritud hinnale, on rida juba
+         korrigeeritud (kasutaja on kogused ise ümber arvutanud) ja jääb puutumata; kui lähemal
+         korrigeerimata hinnale (× tükelduse suhe), korrigeeritakse.
+      2. Kui turuhinda pole (või ostuhind on 0): kui tükelduse järel (−5…+45 päeva) on 0-hinnaga rida,
+         loetakse tükeldus failis märgituks; muidu korrigeeritakse.
     """
+    import math
+
     lots = lots.copy()
     notes = []
     for t, events in splits.items():
+        events = [(_naive_day(w), r) for w, r in events if r and r != 1]
+        if not events:
+            continue
         mine = lots["Ticker"] == t
-        for when, ratio in events:
-            if not ratio or ratio == 1:
+        adjusted_rows = 0
+        for idx in lots.index[mine & (lots["Kogus"] > 0) & lots["Kuupäev"].notna()]:
+            day = _naive_day(lots.at[idx, "Kuupäev"])
+            later = [(w, r) for w, r in events if day < w]
+            if not later:
                 continue
-            when = pd.Timestamp(when).tz_localize(None) if pd.Timestamp(when).tzinfo else pd.Timestamp(when)
-            zero = mine & (lots["Ostuhind"] == 0) & lots["Kuupäev"].between(
-                when - pd.Timedelta(days=5), when + pd.Timedelta(days=handled_window_days))
-            before = mine & (lots["Kuupäev"] < when) & (lots["Kogus"] > 0)
-            if zero.any() or not before.any():
+            # 1) Tükeldus märgitud eraldi 0-hinnaga reaga (Yahoo tavapärane viis) -> ära puutu
+            recorded = [(w, r) for w, r in later if (mine & (lots["Ostuhind"] == 0) & lots["Kuupäev"].between(
+                w - pd.Timedelta(days=5), w + pd.Timedelta(days=handled_window_days))).any()]
+            later = [x for x in later if x not in recorded]
+            if not later:
                 continue
-            lots.loc[before, "Kogus"] *= ratio
-            lots.loc[before, "Ostuhind"] /= ratio
-            notes.append(f"{t}: tükeldus {ratio:g}:1 ({when.date()}) polnud failis märgitud – "
+            cum = math.prod(r for _, r in later)
+            paid = lots.at[idx, "Ostuhind"]
+            # 2) Ostuhind juba ümber arvutatud? Võrdle tolle päeva korrigeeritud turuhinnaga
+            market = price_at(t, day) if price_at is not None and paid and paid > 0 else None
+            if market:
+                rec_cum = math.prod(r for _, r in recorded)  # turuhind on korrigeeritud ka märgitud tükeldusteks
+                m = market * rec_cum
+                if abs(math.log(paid / m)) <= abs(math.log(paid / (m * cum))):
+                    continue
+            lots.at[idx, "Kogus"] *= cum
+            lots.at[idx, "Ostuhind"] /= cum
+            adjusted_rows += 1
+        if adjusted_rows:
+            ratios = ", ".join(f"{r:g}:1 ({w.date()})" for w, r in events)
+            notes.append(f"{t}: tükeldus {ratios} polnud {adjusted_rows} ostureal arvestatud – "
                          f"kogused korrigeeritud automaatselt")
     return lots, notes
 
