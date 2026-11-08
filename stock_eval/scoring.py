@@ -79,7 +79,8 @@ def evaluate(snapshot: Snapshot, weights: dict[str, float] | None = None,
     fund = evaluate_fundamentals(snapshot.info, snapshot.statements)
     dcf, reason = evaluate_dcf(snapshot.info, snapshot.fcf_history, snapshot.price, **(dcf_overrides or {}))
     tech = evaluate_technical(snapshot.prices)
-    growth = evaluate_growth(snapshot.info, snapshot.estimates, snapshot.price, **(growth_overrides or {}))
+    growth = evaluate_growth(snapshot.info, snapshot.estimates, snapshot.price,
+                             statements=snapshot.statements, **(growth_overrides or {}))
     total = combine({"fundamental": fund["score"], "dcf": dcf.score if dcf else None,
                      "technical": tech["score"], "growth": growth.score(horizon)}, weights)
     return Evaluation(snapshot, fund, dcf, reason, tech, growth, horizon, total)

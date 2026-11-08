@@ -81,7 +81,8 @@ def _row(df: pd.DataFrame | None, name: str) -> list[float]:
 def _statements(t: yf.Ticker) -> dict[str, list[float]]:
     """Aastased read aruannetest (vanim -> uusim): käive, brutokasum, SBC, FCF, laovarud."""
     out: dict[str, list[float]] = {}
-    for attr, rows in (("income_stmt", {"revenue": "Total Revenue", "gross_profit": "Gross Profit"}),
+    for attr, rows in (("income_stmt", {"revenue": "Total Revenue", "gross_profit": "Gross Profit",
+                                        "shares": "Diluted Average Shares"}),
                        ("cashflow", {"sbc": "Stock Based Compensation", "fcf": "Free Cash Flow"}),
                        ("balance_sheet", {"inventory": "Inventory"})):
         try:

@@ -13,6 +13,7 @@ import yfinance as yf
 from stock_eval.data import fetch_snapshot
 from stock_eval.dcf import estimate_discount_rate, estimate_growth
 from stock_eval.fundamentals import CATEGORIES, TECH_CATEGORY
+from stock_eval.growth import sector_pe
 from stock_eval import benchmark as bm
 from stock_eval.portfolio import (aggregate_lots, apply_splits, fx_symbol, holdings_table, normalize_currency,
                                   read_lots, weighted_score)
@@ -224,6 +225,47 @@ if portfolio is not None and (portfolio["Kogus"] > 0).any():
         st.info("Nõrga koondskooriga positsioonid (<40): " + ", ".join(
             f"{r.Ticker} ({r.Osakaal:.0%} portfellist)" for r in weak.itertuples()) +
             " — vaata detailvaatest, milline osaskoor neid alla tõmbab.")
+
+    # ---------------- Kust tuleb portfelli kasv ----------------
+    with st.expander(f"Kust tuleb portfelli oodatav kasv {horizon} aastaga?", expanded=True):
+        parts = []
+        for tkr, val in zip(h["Ticker"], h[val_col]):
+            ev_t = evals.get(tkr)
+            dd = ev_t.growth.decompose(horizon) if ev_t else None
+            if not dd or pd.isna(val):
+                continue
+            k = val / dd.price0  # aktsia valuutas summad -> eurod (praeguse väärtuse järgi)
+            parts.append({"Ticker": tkr, "Käibe kasv": dd.revenue_part * k, "Marginaal": dd.margin_part * k,
+                          "Aktsiate arv": dd.buyback_part * k, "P/E muutus": dd.pe_effect * k,
+                          "Dividendid": dd.dividends * k})
+        if not parts:
+            st.info("Kasumipõhist prognoosi ei saanud ühelegi positsioonile teha.")
+        else:
+            pdf = pd.DataFrame(parts).set_index("Ticker")
+            pdf["Kokku"] = pdf.sum(axis=1)
+            pdf = pdf.sort_values("Kokku", ascending=False)
+            tot = pdf.sum()
+            cols = st.columns(6)
+            for col, name in zip(cols, ["Käibe kasv", "Marginaal", "Aktsiate arv", "P/E muutus", "Dividendid",
+                                        "Kokku"]):
+                col.metric(name, f"{tot[name]:+,.0f} €")
+            fig = go.Figure()
+            colors = {"Käibe kasv": "#27ae60", "Marginaal": "#16a085", "Aktsiate arv": "#8e44ad",
+                      "P/E muutus": "#e67e22", "Dividendid": "#2e86de"}
+            for name, color in colors.items():
+                fig.add_bar(name=name, x=pdf.index, y=pdf[name], marker_color=color)
+            fig.add_scatter(name="Kokku", x=pdf.index, y=pdf["Kokku"], mode="markers",
+                            marker=dict(symbol="diamond", size=10, color="#2c3e50"))
+            fig.update_layout(barmode="relative", height=380, margin=dict(t=30, b=10), legend_orientation="h",
+                              title=f"Oodatav väärtuse muutus positsioonide kaupa, {horizon} a (€)")
+            st.plotly_chart(fig, width="stretch")
+            top = pdf["Kokku"].head(3)
+            st.caption(
+                f"Kasumipõhise mudeli järgi tuleb {horizon} aastaga kõige rohkem kasvu positsioonidest "
+                + ", ".join(f"{t} ({v:+,.0f} €)" for t, v in top.items())
+                + f". Kasumi kasv kokku (käive + marginaal + aktsiate arv) annab "
+                f"{tot['Käibe kasv'] + tot['Marginaal'] + tot['Aktsiate arv']:+,.0f} €, P/E muutus "
+                f"{tot['P/E muutus']:+,.0f} €. Iga aktsia selgitus on detailvaate sakis „Kasvupotentsiaal”.")
 
     # ---------------- Võrdlus indeksiga ----------------
     st.divider()
@@ -438,6 +480,75 @@ with tab_g:
         fig.update_layout(height=380, margin=dict(t=30, b=10), legend_orientation="h",
                           title=f"Hinnarada ja prognoos ({cur})")
         st.plotly_chart(fig, width="stretch")
+
+        # ---------- Miks just selline hind? ----------
+        st.markdown("#### Miks just selline hind? Kust tuleb väärtuse kasv")
+        yrs = st.radio("Selgituse horisont", [1, 3, 5], index=2, horizontal=True,
+                       format_func=lambda y: f"{y} a", key=f"explain_{sel}")
+        d = gr.decompose(yrs)
+        if d:
+            pct = lambda r: f"{r - 1:+.0%}"
+            eps_n = gr.eps0 * d.eps_ratio
+            pe_n = gr.pe_now * d.pe_ratio
+            st.markdown(f"""
+Aktsia hind = **kasum aktsia kohta (EPS) × P/E** (kui mitu aastat kasumit investorid aktsia eest maksavad).
+
+| | Praegu | {yrs} a pärast | Muutus |
+|---|---|---|---|
+| Kasum aktsia kohta (EPS, järgmised 12 k) | {gr.eps0:,.2f} | {eps_n:,.2f} | {pct(d.eps_ratio)} |
+| P/E | {gr.pe_now:.1f} | {pe_n:.1f} | {pct(d.pe_ratio)} |
+| **Hind** | **{d.price0:,.2f}** | **{d.price_n:,.2f}** | **{pct(d.price_n / d.price0)}** |
+
+**Kasum aktsia kohta muutub {pct(d.eps_ratio)}, sest:**
+- **käive** kasvab {pct(d.rev_ratio)} — analüütikute käibeprognoos {gr.rev_growth or gr.growth:.1%} 1. aastal, mis aeglustub 5 aastaga 6%-ni;
+- **kasumimarginaal** muutub {pct(d.margin_ratio)} — tuleneb sellest, et kasumiprognoos ({gr.growth:.1%}) on {"kiirem" if d.margin_ratio > 1 else "aeglasem"} kui käibe kasv;
+- **aktsiate arv** muutub {pct(d.share_ratio)} — ajalooline trend {gr.share_change:+.1%} aastas
+  ({"tagasiostud suurendavad kasumit aktsia kohta" if gr.share_change < -0.002 else "uute aktsiate emissioon (nt aktsiapõhised tasud, ülevõtmised) lahjendab kasumit aktsia kohta" if gr.share_change > 0.002 else "aktsiate arv on püsinud sisuliselt samana"}).
+
+**P/E muutub {pct(d.pe_ratio)}**, sest mudel eeldab, et praegune kordaja {gr.pe_now:.1f} liigub 5 aastaga poole võrra
+sektori tavapärase taseme ({sector_pe(snap.info):.0f}) suunas{" — kõrge P/E kahaneb, kui kasv aeglustub" if d.pe_ratio < 1 else " — madal P/E tõuseb, kui turg firmat ümber hindab" if d.pe_ratio > 1 else ""}.
+""")
+            steps = [("Käibe kasv", d.revenue_part), ("Marginaal", d.margin_part),
+                     ("Aktsiate arv", d.buyback_part), ("P/E muutus", d.pe_effect)]
+            fig = go.Figure(go.Waterfall(
+                x=["Hind praegu"] + [s[0] for s in steps] + [f"Hind {yrs} a pärast", "Dividendid", "Kokku"],
+                measure=["absolute"] + ["relative"] * len(steps) + ["total", "relative", "total"],
+                y=[d.price0] + [s[1] for s in steps] + [0, d.dividends, 0],
+                text=[f"{d.price0:,.0f}"] + [f"{s[1]:+,.0f}" for s in steps] +
+                     [f"{d.price_n:,.0f}", f"{d.dividends:+,.0f}", f"{d.price_n + d.dividends:,.0f}"],
+                textposition="outside",
+                increasing=dict(marker_color="#27ae60"), decreasing=dict(marker_color="#e74c3c"),
+                totals=dict(marker_color="#2e86de"), connector=dict(line=dict(color="#95a5a6", width=1)),
+            ))
+            fig.update_layout(height=400, margin=dict(t=40, b=10), showlegend=False,
+                              title=f"Kust tuleb hinnamuutus {yrs} aastaga ({cur} aktsia kohta)")
+            st.plotly_chart(fig, width="stretch")
+
+            # Peamine tõukejõud ühe lausega
+            drivers = {"käibe kasv": d.revenue_part, "marginaali muutus": d.margin_part,
+                       "aktsiate arvu muutus": d.buyback_part, "P/E muutus": d.pe_effect, "dividendid": d.dividends}
+            pos = max(drivers, key=drivers.get)
+            neg = min(drivers, key=drivers.get)
+            st.info(f"**Suurim kasvu allikas:** {pos} ({drivers[pos]:+,.0f} {cur}). "
+                    + (f"**Suurim pidur:** {neg} ({drivers[neg]:+,.0f} {cur})." if drivers[neg] < 0 else ""))
+
+            req = gr.required_growth(yrs)
+            if req is not None:
+                verdict = ("eeldus on sellest kõrgem ✅" if gr.growth >= req else "eeldus jääb sellest alla ⚠️")
+                st.markdown(f"**Mida praegune hind eeldab?** Et aktsia annaks {yrs} aastaga **10% aastas**, "
+                            f"peaks kasum aktsia kohta kasvama keskmiselt **{req:.1%} aastas** (mudeli P/E muutuse "
+                            f"juures). Mudeli 1. aasta kasvueeldus on {gr.growth:.1%} — {verdict}")
+
+            sens = gr.sensitivity(yrs)
+            if sens:
+                st.markdown(f"**Tundlikkus** — oodatav hind {yrs} a pärast, kui eeldused on teised")
+                row_label = {0.75: "P/E −25%", 1.0: "P/E mudeli järgi", 1.25: "P/E +25%"}
+                tbl = pd.DataFrame({row_label[f]: {f"kasv {gr.growth + g:.0%}": v for g, v in row.items()}
+                                    for f, row in sens.items()}).T
+                tbl = tbl.map(lambda v: f"{v:,.2f} ({v / d.price0 - 1:+.0%})")
+                st.dataframe(tbl, width="stretch")
+                st.caption(f"Praegune hind {d.price0:,.2f}. Veerud: 1. aasta kasumi kasv (±5 %-p); "
+                           "read: P/E horisondi lõpus (±25%).")
     s = gr.score(horizon)
     st.caption(f"Kasvupotentsiaali skoor ({horizon} a): {s:.0f}/100 — keskmine analüütikute 12 k potentsiaalist "
                "(−10% → 0, +30% → 100) ja mudeli aastasest tootlusest (−5% → 0, +20% → 100)."
